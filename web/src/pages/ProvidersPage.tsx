@@ -312,13 +312,13 @@ export function ProvidersPage() {
       key: 'provider',
       header: 'Provider',
       render: (p) => (
-        <div className="flex items-center gap-2.5">
-          <span className={classNames('flex h-8 w-8 items-center justify-center rounded-[8px] text-[12px] font-bold', providerHue(p.name))}>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={classNames('flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] text-[12px] font-bold', providerHue(p.name))}>
             {providerInitial(p.name)}
           </span>
           <div className="min-w-0">
             <p className="truncate font-medium text-text">{p.name}</p>
-            <p className="truncate font-mono text-[11px] text-muted">{p.base_url}</p>
+            <p className="truncate font-mono text-[11px] text-muted" title={p.base_url}>{p.base_url}</p>
           </div>
         </div>
       ),

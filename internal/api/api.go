@@ -192,6 +192,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Dashboard & settings.
 	mux.HandleFunc("GET /admin/overview", s.withAuth(s.handleOverview))
+	mux.HandleFunc("GET /admin/overview/series", s.withAuth(s.handleSeries))
 	mux.HandleFunc("GET /admin/live", s.withAuth(s.handleLive))
 	// Test Lab: admin-only calls through the real routing pipeline.
 	mux.HandleFunc("POST /admin/playground/chat", s.withAuth(s.handlePlaygroundChat))

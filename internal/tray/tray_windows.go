@@ -207,6 +207,16 @@ func Run(o Options) error {
 	return nil
 }
 
+// Stop tears the tray icon down from another goroutine: it posts WM_CLOSE to
+// the tray window so the message loop exits, the icon is removed from the
+// notification area, and nothing of the tray remains after the process quits.
+func Stop() {
+	if hwnd == 0 {
+		return
+	}
+	procPostMessageW.Call(uintptr(hwnd), wmClose, 0, 0)
+}
+
 func addIcon() error {
 	iconPath := filepath.Join(os.TempDir(), fmt.Sprintf("myrouter-tray-%d.ico", os.Getpid()))
 	if err := os.WriteFile(iconPath, iconBytes, 0o600); err != nil {

@@ -36,3 +36,5 @@ stitch_myrouter_ai_gateway_ui_kit/
 *.swp
 .DS_Store
 Thumbs.db
+
+myrouter.exe~

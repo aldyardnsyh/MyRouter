@@ -87,6 +87,60 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request, _ *authSess
 	writeOK(w, map[string]any{"data": rows, "summary": m, "group_by": groupBy, "days": days})
 }
 
+// seriesRange maps a dashboard range to bucket count and width. Hourly for a
+// single day keeps the intraday shape; daily for 3d and 7d keeps the buckets
+// wide enough to read on a card.
+func seriesRange(v string) (int, time.Duration, string) {
+	switch v {
+	case "3d":
+		return 3, 24 * time.Hour, "3d"
+	case "7d":
+		return 7, 24 * time.Hour, "7d"
+	case "30d":
+		return 30, 24 * time.Hour, "30d"
+	default:
+		return 24, time.Hour, "24h"
+	}
+}
+
+// handleSeries returns the dashboard chart series for a range, with the same
+// aggregates the chart summary shows (requests, ok/failed/blocked, tokens,
+// latency) so the tooltip and the summary never disagree.
+func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request, _ *authSession) {
+	buckets, width, label := seriesRange(r.URL.Query().Get("range"))
+	series, err := s.db.ChartSeries(buckets, width)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	var sum store.SeriesPoint
+	for _, p := range series {
+		sum.Requests += p.Requests
+		sum.OK += p.OK
+		sum.Failed += p.Failed
+		sum.Blocked += p.Blocked
+		sum.Fallbacks += p.Fallbacks
+		sum.InTokens += p.InTokens
+		sum.OutTokens += p.OutTokens
+		if p.MaxLatency > sum.MaxLatency {
+			sum.MaxLatency = p.MaxLatency
+		}
+	}
+	if sum.Requests > 0 {
+		var latSum float64
+		for _, p := range series {
+			latSum += p.AvgLatency * float64(p.Requests)
+		}
+		sum.AvgLatency = latSum / float64(sum.Requests)
+	}
+	writeOK(w, map[string]any{
+		"data":       series,
+		"summary":    sum,
+		"range":      label,
+		"bucket_sec": int(width.Seconds()),
+	})
+}
+
 // handleOverview powers the dashboard.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request, _ *authSession) {
 	metrics24h, err := s.db.Metrics(time.Now().Add(-24 * time.Hour).Unix())

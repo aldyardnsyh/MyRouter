@@ -201,6 +201,26 @@ export interface Metrics {
   active_routes: number;
 }
 
+export interface SeriesPoint {
+  start: number;
+  requests: number;
+  ok: number;
+  failed: number;
+  blocked: number;
+  fallbacks: number;
+  in_tokens: number;
+  out_tokens: number;
+  avg_latency_ms: number;
+  max_latency_ms: number;
+}
+
+export interface SeriesResponse {
+  data: SeriesPoint[];
+  summary: SeriesPoint;
+  range: string;
+  bucket_sec: number;
+}
+
 export interface Overview {
   metrics: Metrics;
   series: number[];

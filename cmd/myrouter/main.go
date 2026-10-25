@@ -202,11 +202,20 @@ func main() {
 	case <-stop:
 	case <-quit:
 	}
+	// Quitting (tray menu, Ctrl+C, SIGTERM) means the whole system stops:
+	// remove the tray icon, cancel every background worker (guard engine,
+	// monitor, scheduler) and close the HTTP server. Nothing keeps running
+	// in the background after this point.
+	tray.Stop()
+	cancel()
 	log.Info("shutting down")
 	engine.Snapshot()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+	// Belt and braces: no goroutine may hold the process alive once the user
+	// asked to quit, so exit explicitly after the graceful drain.
+	os.Exit(0)
 }
 
 // dashboardAddr turns a listen address into a browser URL, replacing wildcard

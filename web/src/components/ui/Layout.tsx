@@ -73,14 +73,14 @@ const statTone = {
 
 export function StatCard({ label, value, hint, tone = 'default', icon }: StatCardProps) {
   return (
-    <div className="flex flex-col justify-between rounded-card border border-border bg-bg p-4">
+    <div className="flex min-w-0 flex-col justify-between rounded-card border border-border bg-bg p-4">
       <div className="flex items-center justify-between gap-2">
         <span className="text-small text-muted">{label}</span>
         {icon && <span className="text-muted">{icon}</span>}
       </div>
-      <div className="mt-3 flex flex-col gap-1">
-        <span className="text-[24px] font-bold leading-none tracking-[-0.02em] text-text tabular">{value}</span>
-        {hint && <span className={classNames('text-[11.5px] font-medium', statTone[tone])}>{hint}</span>}
+      <div className="mt-3 flex min-w-0 flex-col gap-1">
+        <span className={classNames('break-words font-bold leading-none tracking-[-0.02em] text-text tabular [overflow-wrap:anywhere]', value.length > 14 ? 'text-[16px]' : value.length > 8 ? 'text-[20px]' : 'text-[24px]')}>{value}</span>
+        {hint && <span className={classNames('break-words text-[11.5px] font-medium [overflow-wrap:anywhere]', statTone[tone])}>{hint}</span>}
       </div>
     </div>
   );

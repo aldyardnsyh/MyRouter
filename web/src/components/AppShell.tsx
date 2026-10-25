@@ -151,8 +151,12 @@ export function AppShell() {
   const { data: overview } = useQuery(() => admin.overview(), { cacheKey: 'overview' });
   const baseUrl = overview?.base_url || `${window.location.origin}/v1`;
   const [mobileNav, setMobileNav] = useState(false);
-  const { data: health } = useQuery(() => admin.health(), { cacheKey: 'health', refreshMs: 30000 });
-  const running = !health || health.status === 'ok';
+  const { data: health, error: healthError } = useQuery(() => admin.health(), { cacheKey: 'health', refreshMs: 30000 });
+  // Quitting via the system tray (or Ctrl+C) stops the whole process: server,
+  // gateway and every background worker. An unreachable health endpoint means
+  // the system is fully stopped, not merely degraded.
+  const offline = healthError !== null;
+  const running = !offline && (!health || health.status === 'ok');
 
   return (
     <div className="min-h-screen bg-bg">
@@ -188,9 +192,9 @@ export function AppShell() {
         </div>
         <div className="flex items-center justify-between gap-2 border-t border-border bg-surface px-3 py-3">
           <div className="flex min-w-0 items-center gap-2">
-            <span className={classNames('h-2 w-2 shrink-0 rounded-full', running ? 'bg-success' : 'bg-warning')} aria-hidden />
+            <span className={classNames('h-2 w-2 shrink-0 rounded-full', offline ? 'bg-danger' : running ? 'bg-success' : 'bg-warning')} aria-hidden />
             <div className="flex min-w-0 flex-col">
-              <span className="text-[11.5px] leading-none font-medium text-text">{running ? 'Running' : 'Degraded'}</span>
+              <span className="text-[11.5px] leading-none font-medium text-text">{offline ? 'Stopped' : running ? 'Running' : 'Degraded'}</span>
               <span className="mt-1 font-mono text-[10.5px] leading-none text-muted">v{version}</span>
             </div>
           </div>

@@ -188,6 +188,7 @@ export const admin = {
     api<{ ok: boolean }>('/auth/password', { method: 'POST', body: { current_password, new_password } }),
 
   overview: () => api<import('./types').Overview>('/overview'),
+  series: (range: string) => api<import('./types').SeriesResponse>(`/overview/series?range=${range}`),
   live: () => api<import('./types').LiveSnapshot>('/live'),
 
   playground: {

@@ -222,6 +222,93 @@ func (db *DB) RequestsSeries(hours int) ([]int64, error) {
 	return buckets, rows.Err()
 }
 
+// SeriesPoint is one bucket of the dashboard chart. Every field is real data
+// from request_log so the chart, the tooltip and the summary agree.
+type SeriesPoint struct {
+	Start       int64   `json:"start"`
+	Requests    int64   `json:"requests"`
+	OK          int64   `json:"ok"`
+	Failed      int64   `json:"failed"`
+	Blocked     int64   `json:"blocked"`
+	Fallbacks   int64   `json:"fallbacks"`
+	InTokens    int64   `json:"in_tokens"`
+	OutTokens   int64   `json:"out_tokens"`
+	AvgLatency  float64 `json:"avg_latency_ms"`
+	MaxLatency  int64   `json:"max_latency_ms"`
+}
+
+// ChartSeries buckets request_log into n buckets of bucketDur seconds ending
+// at the current bucket. Hourly buckets answer "when is traffic heaviest" for
+// the last day; daily buckets answer "which day was busiest" for 3d and 7d.
+func (db *DB) ChartSeries(buckets int, bucketDur time.Duration) ([]SeriesPoint, error) {
+	if buckets <= 0 {
+		return []SeriesPoint{}, nil
+	}
+	now := time.Now()
+	step := int64(bucketDur.Seconds())
+	if step <= 0 {
+		step = 3600
+	}
+	// Align the first bucket to the bucket boundary so labels are stable.
+	current := now.Unix() - now.Unix()%step
+	start := current - int64(buckets-1)*step
+
+	out := make([]SeriesPoint, buckets)
+	for i := range out {
+		out[i].Start = start + int64(i)*step
+	}
+
+	rows, err := db.Query(`SELECT ts, status, COALESCE(in_tokens,0), COALESCE(out_tokens,0),
+		COALESCE(latency_ms,0), CASE WHEN COALESCE(fallback_from,'') <> '' THEN 1 ELSE 0 END
+		FROM request_log WHERE ts >= ?`, start)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// latency sums are accumulated per bucket, then averaged once at the end.
+	latSum := make([]int64, buckets)
+	for rows.Next() {
+		var (
+			ts, inTok, outTok, lat, fb int64
+			status                     string
+		)
+		if err := rows.Scan(&ts, &status, &inTok, &outTok, &lat, &fb); err != nil {
+			return nil, err
+		}
+		idx := int((ts - start) / step)
+		if idx < 0 || idx >= buckets {
+			continue
+		}
+		p := &out[idx]
+		p.Requests++
+		p.InTokens += inTok
+		p.OutTokens += outTok
+		p.Fallbacks += fb
+		switch status {
+		case "ok":
+			p.OK++
+		case "blocked":
+			p.Blocked++
+		default:
+			p.Failed++
+		}
+		latSum[idx] += lat
+		if lat > p.MaxLatency {
+			p.MaxLatency = lat
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if out[i].Requests > 0 {
+			out[i].AvgLatency = float64(latSum[i]) / float64(out[i].Requests)
+		}
+	}
+	return out, nil
+}
+
 // AddUsage upserts usage_daily for a request.
 func (db *DB) AddUsage(date, routeID, providerID, apiKeyID, status string, inTokens, outTokens int, fallback bool, cost *float64) error {
 	ok, failed := 0, 0

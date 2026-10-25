@@ -9,6 +9,7 @@ import { Badge, StatusBadge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { admin, ApiError } from '../lib/api';
 import { useQuery } from '../lib/useQuery';
+import type { SeriesPoint } from '../lib/types';
 
 import {
   activityBadge,
@@ -25,15 +26,50 @@ import {
 } from '../lib/format';
 
 const CHART_W = 680;
-const CHART_PAD_R = 26;
 const CHART_H = 168;
+const CHART_PAD_R = 26;
 
-function hourLabel(d: Date) {
+const RANGES = [
+  { id: '24h', label: '24h', bucket: 3600 },
+  { id: '3d', label: '3d', bucket: 86400 },
+  { id: '7d', label: '7d', bucket: 86400 },
+  { id: '30d', label: '30d', bucket: 86400 },
+] as const;
+
+type RangeId = (typeof RANGES)[number]['id'];
+
+// The chart plots one of three metrics per bucket; the hover tooltip always
+// shows the full breakdown regardless of which metric is on the line.
+const METRICS = [
+  { id: 'requests', label: 'Requests' },
+  { id: 'tokens', label: 'Tokens' },
+  { id: 'latency', label: 'Latency' },
+] as const;
+
+type MetricId = (typeof METRICS)[number]['id'];
+
+// Bucket label depends on the width: hours for a single day, calendar days for
+// multi-day ranges, so the axis never claims more precision than it has.
+function bucketLabel(sec: number, bucketSec: number, isLast: boolean) {
+  const d = new Date(sec * 1000);
+  if (bucketSec >= 86400) {
+    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+  }
+  if (isLast) return 'Now';
   return `${String(d.getHours()).padStart(2, '0')}:00`;
 }
 
-// Catmull-Rom to cubic bezier: hourly buckets are samples of a continuous
-// trend, and a smooth curve keeps small deltas readable instead of spiky.
+function bucketRangeLabel(sec: number, bucketSec: number) {
+  const from = new Date(sec * 1000);
+  const to = new Date((sec + bucketSec) * 1000);
+  const day = (d: Date) => d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+  const clock = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:00`;
+  if (bucketSec >= 86400) return day(from);
+  return `${clock(from)} - ${clock(to)}`;
+}
+
+// Catmull-Rom to cubic bezier: buckets sample a continuous trend, and a smooth
+// curve keeps small deltas readable instead of spiky.
 function smoothPath(pts: readonly (readonly [number, number])[]) {
   if (pts.length < 2) return pts.length ? `M ${pts[0][0]},${pts[0][1]}` : '';
   let d = `M ${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
@@ -51,8 +87,8 @@ function smoothPath(pts: readonly (readonly [number, number])[]) {
   return d;
 }
 
-// Motion purpose (R-19): one draw-in on mount/refresh to lead the eye along
-// the trend, then rest. No loops. Disabled under prefers-reduced-motion.
+// Motion purpose: one draw-in on mount and on range change to lead the eye
+// along the trend, then rest. No loops. Off under prefers-reduced-motion.
 const chartStyle = `
 @keyframes mrc-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 @keyframes mrc-fade { from { opacity: 0; } to { opacity: 1; } }
@@ -65,12 +101,51 @@ const chartStyle = `
   .mrc-area { animation: none; opacity: 1; }
 }`;
 
-function RequestChart({ series }: { series: number[] }) {
-  const data = series.length ? series : new Array(24).fill(0);
+function SeriesChart({
+  points,
+  bucketSec,
+  range,
+  metric,
+  loading,
+}: {
+  points: SeriesPoint[];
+  bucketSec: number;
+  range: RangeId;
+  metric: MetricId;
+  loading: boolean;
+}) {
+  const empty: SeriesPoint = {
+    start: Math.floor(Date.now() / 1000),
+    requests: 0,
+    ok: 0,
+    failed: 0,
+    blocked: 0,
+    fallbacks: 0,
+    in_tokens: 0,
+    out_tokens: 0,
+    avg_latency_ms: 0,
+    max_latency_ms: 0,
+  };
+  const data = points.length ? points : [empty];
   const [active, setActive] = useState<number | null>(null);
-  const total = data.reduce((a, b) => a + b, 0);
-  const peak = Math.max(...data);
-  const peakIdx = data.indexOf(peak);
+  // Value plotted for the active metric. Latency buckets with no traffic plot
+  // as 0 so gaps in traffic read as gaps, not as fake zero-latency dips.
+  const val = (d: SeriesPoint) =>
+    metric === 'requests' ? d.requests : metric === 'tokens' ? d.in_tokens + d.out_tokens : d.requests ? d.avg_latency_ms : 0;
+  const yLabel = metric === 'latency' ? formatLatency : formatCompact;
+  const totals = data.reduce(
+    (a, d) => ({
+      requests: a.requests + d.requests,
+      ok: a.ok + d.ok,
+      failed: a.failed + d.failed,
+      blocked: a.blocked + d.blocked,
+      fallbacks: a.fallbacks + d.fallbacks,
+      tokens: a.tokens + d.in_tokens + d.out_tokens,
+    }),
+    { requests: 0, ok: 0, failed: 0, blocked: 0, fallbacks: 0, tokens: 0 },
+  );
+  const peak = Math.max(...data.map(val), 0);
+  const peakIdx = peak > 0 ? data.findIndex((d) => val(d) === peak) : -1;
   const niceMax = Math.max(4, Math.ceil(Math.max(peak, 1) / 4) * 4);
   const width = CHART_W;
   const height = CHART_H;
@@ -78,25 +153,29 @@ function RequestChart({ series }: { series: number[] }) {
   const plotW = width - CHART_PAD_R;
   const step = plotW / Math.max(1, data.length - 1);
   const y = (v: number) => height - (v / niceMax) * (height - padTop - 6) - 6;
-  const pts = data.map((v, i) => [i * step, y(v)] as const);
+  const pts = data.map((d, i) => [i * step, y(val(d))] as const);
   const line = smoothPath(pts);
   const area = `${line} L ${width - CHART_PAD_R},${height} L 0,${height} Z`;
-  const bucketStart = (i: number) => {
-    const d = new Date();
-    d.setMinutes(0, 0, 0);
-    d.setHours(d.getHours() - (data.length - 1 - i));
-    return d;
-  };
   const activeX = active !== null ? pts[active][0] : 0;
   const activeY = active !== null ? pts[active][1] : 0;
-  const tooltipLeft = active !== null ? Math.min(Math.max(activeX, 82), width - CHART_PAD_R - 82) : 0;
-  const ticks = [0, 6, 12, 18, data.length - 1];
-  const avgPerHour = total / data.length;
+  const tooltipLeft = active !== null ? Math.min(Math.max(activeX, 96), width - CHART_PAD_R - 96) : 0;
+  const last = data.length - 1;
+  const tickIdx =
+    data.length <= 5
+      ? data.map((_, i) => i)
+      : [0, Math.round(last / 4), Math.round(last / 2), Math.round((last * 3) / 4), last];
+  const perLabel = bucketSec >= 86400 ? '/day' : '/hr';
+  const badTotal = totals.failed + totals.blocked;
+  // Request-weighted average latency across buckets that actually had traffic.
+  const latBuckets = data.filter((d) => d.requests > 0);
+  const avgLat = latBuckets.length
+    ? latBuckets.reduce((a, d) => a + d.avg_latency_ms * d.requests, 0) / latBuckets.reduce((a, d) => a + d.requests, 0)
+    : 0;
 
   function onKey(e: KeyboardEvent<HTMLDivElement>) {
     if (e.key === 'ArrowRight') {
       e.preventDefault();
-      setActive((a) => (a === null ? data.length - 1 : Math.min(data.length - 1, a + 1)));
+      setActive((a) => (a === null ? last : Math.min(last, a + 1)));
     } else if (e.key === 'ArrowLeft') {
       e.preventDefault();
       setActive((a) => (a === null ? 0 : Math.max(0, a - 1)));
@@ -105,109 +184,188 @@ function RequestChart({ series }: { series: number[] }) {
       setActive(0);
     } else if (e.key === 'End') {
       e.preventDefault();
-      setActive(data.length - 1);
+      setActive(last);
     } else if (e.key === 'Escape') {
       setActive(null);
     }
   }
 
+  const act = active !== null ? data[active] : null;
+
   return (
     <div className="flex flex-col">
       <style>{chartStyle}</style>
       <div className="mrc-plot relative">
-      <div
-        tabIndex={0}
-        role="img"
-        aria-label={`Hourly requests, last 24 hours. Total ${formatNumber(total)}, peak ${formatNumber(peak)} per hour.`}
-        onKeyDown={onKey}
-        onPointerMove={(e) => {
-          const box = e.currentTarget.getBoundingClientRect();
-          if (box.width === 0) return;
-          const ratio = (e.clientX - box.left) / box.width;
-          const idx = Math.round(ratio * (data.length - 1));
-          setActive(Math.min(data.length - 1, Math.max(0, idx)));
-        }}
-        onPointerLeave={() => setActive(null)}
-      >
-        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-[168px] w-full overflow-visible">
-          <defs>
-            <linearGradient id="reqGradient" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="rgb(var(--c-accent))" stopOpacity="0.22" />
-              <stop offset="100%" stopColor="rgb(var(--c-accent))" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          {[0.25, 0.5, 0.75].map((p) => {
-            const v = Math.round(niceMax * (1 - p));
-            return (
-              <g key={p}>
-                <line x1="0" x2={width - CHART_PAD_R} y1={height * p} y2={height * p} stroke="rgb(var(--c-border))" strokeDasharray="3 3" />
-                <text x={width} y={height * p + 3} textAnchor="end" className="fill-[rgb(var(--c-muted))]" fontSize="9">
-                  {formatCompact(v)}
-                </text>
+        <div
+          tabIndex={0}
+          role="img"
+          aria-label={`${METRICS.find((m) => m.id === metric)!.label} per ${bucketSec >= 86400 ? 'day' : 'hour'} over the last ${range}. Total ${formatNumber(
+            totals.requests,
+          )} requests, ${formatCompact(totals.tokens)} tokens, peak ${yLabel(peak)} per bucket.`}
+          onKeyDown={onKey}
+          onPointerMove={(e) => {
+            const box = e.currentTarget.getBoundingClientRect();
+            if (box.width === 0) return;
+            const ratio = (e.clientX - box.left) / box.width;
+            const idx = Math.round(ratio * last);
+            setActive(Math.min(last, Math.max(0, idx)));
+          }}
+          onPointerLeave={() => setActive(null)}
+        >
+          <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-[168px] w-full overflow-visible">
+            <defs>
+              <linearGradient id="reqGradient" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stopColor="rgb(var(--c-accent))" stopOpacity="0.22" />
+                <stop offset="100%" stopColor="rgb(var(--c-accent))" stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            {[0.25, 0.5, 0.75].map((p) => {
+              const v = Math.round(niceMax * (1 - p));
+              return (
+                <g key={p}>
+                  <line x1="0" x2={width - CHART_PAD_R} y1={height * p} y2={height * p} stroke="rgb(var(--c-border))" strokeDasharray="3 3" />
+                  <text x={width} y={height * p + 3} textAnchor="end" className="fill-[rgb(var(--c-muted))]" fontSize="9">
+                    {yLabel(v)}
+                  </text>
+                </g>
+              );
+            })}
+            <line x1="0" x2={width - CHART_PAD_R} y1={height} y2={height} stroke="rgb(var(--c-border))" />
+            <path key={`a-${range}`} d={area} fill="url(#reqGradient)" className="mrc-area" />
+            <path
+              key={`l-${range}`}
+              d={line}
+              fill="none"
+              stroke="rgb(var(--c-accent))"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              pathLength={1}
+              className="mrc-line"
+            />
+            {peakIdx >= 0 && (
+              <circle cx={pts[peakIdx][0]} cy={pts[peakIdx][1]} r="4" fill="rgb(var(--c-bg))" stroke="rgb(var(--c-accent))" strokeWidth="2" />
+            )}
+            {metric === 'requests' &&
+              data.map((d, i) => {
+                if (d.failed <= 0 && d.blocked <= 0) return null;
+                // Failed/blocked mini-bars sit on the baseline under the trend
+                // line, so error spikes are visible without leaving the chart.
+                const barW = Math.min(6, Math.max(2, step * 0.45));
+                const scale = height - padTop - 6;
+                const failedH = (d.failed / niceMax) * scale;
+                const blockedH = (d.blocked / niceMax) * scale;
+                const x = pts[i][0] - barW / 2;
+                return (
+                  <g key={`bar-${i}`}>
+                    {d.failed > 0 && (
+                      <rect x={x} y={height - 6 - failedH} width={barW} height={failedH} rx="1.5" fill="rgb(var(--c-danger))" opacity="0.55" />
+                    )}
+                    {d.blocked > 0 && (
+                      <rect
+                        x={x}
+                        y={height - 6 - failedH - blockedH}
+                        width={barW}
+                        height={blockedH}
+                        rx="1.5"
+                        fill="rgb(var(--c-warning))"
+                        opacity="0.55"
+                      />
+                    )}
+                  </g>
+                );
+              })}
+            {active !== null && (
+              <g>
+                <line x1={activeX} x2={activeX} y1={padTop - 6} y2={height} stroke="rgb(var(--c-accent))" strokeOpacity="0.35" />
+                <circle cx={activeX} cy={activeY} r="4.5" fill="rgb(var(--c-accent))" stroke="rgb(var(--c-bg))" strokeWidth="2" />
               </g>
-            );
-          })}
-          <line x1="0" x2={width - CHART_PAD_R} y1={height} y2={height} stroke="rgb(var(--c-border))" />
-          <path d={area} fill="url(#reqGradient)" className="mrc-area" />
-          <path
-            d={line}
-            fill="none"
-            stroke="rgb(var(--c-accent))"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            pathLength={1}
-            className="mrc-line"
-          />
-          {pts[peakIdx] && peak > 0 && (
-            <circle cx={pts[peakIdx][0]} cy={pts[peakIdx][1]} r="4" fill="rgb(var(--c-bg))" stroke="rgb(var(--c-accent))" strokeWidth="2" />
+            )}
+          </svg>
+          {act && (
+            <div
+              className="pointer-events-none absolute z-10 w-[190px] -translate-x-1/2 rounded-lg border border-border bg-surface px-2.5 py-2 shadow-md"
+              style={{ left: `${(tooltipLeft / width) * 100}%`, top: 6 }}
+            >
+              <p className="font-mono text-[10px] text-muted">{bucketRangeLabel(act.start, bucketSec)}</p>
+              <p className="mt-0.5 text-[12.5px] font-semibold text-text">
+                {metric === 'latency'
+                  ? act.requests
+                    ? formatLatency(act.avg_latency_ms)
+                    : '-'
+                  : formatNumber(act.requests)}
+                <span className="font-normal text-muted">
+                  {' '}
+                  {metric === 'latency' ? 'avg latency' : metric === 'tokens' ? `tokens (${formatCompact(act.in_tokens + act.out_tokens)})` : 'requests'}
+                </span>
+              </p>
+              <dl className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10.5px]">
+                <dt className="text-muted">ok</dt>
+                <dd className="text-right font-mono text-text">{formatNumber(act.ok)}</dd>
+                <dt className="text-muted">failed</dt>
+                <dd className="text-right font-mono text-text">{formatNumber(act.failed)}</dd>
+                <dt className="text-muted">blocked</dt>
+                <dd className="text-right font-mono text-text">{formatNumber(act.blocked)}</dd>
+                <dt className="text-muted">fallback</dt>
+                <dd className="text-right font-mono text-text">{formatNumber(act.fallbacks)}</dd>
+                <dt className="text-muted">tokens</dt>
+                <dd className="text-right font-mono text-text">{formatCompact(act.in_tokens + act.out_tokens)}</dd>
+                <dt className="text-muted">avg latency</dt>
+                <dd className="text-right font-mono text-text">
+                  {act.requests ? formatLatency(act.avg_latency_ms) : '-'}
+                </dd>
+              </dl>
+            </div>
           )}
-          {active !== null && (
-            <g>
-              <line x1={activeX} x2={activeX} y1={padTop - 6} y2={height} stroke="rgb(var(--c-accent))" strokeOpacity="0.35" />
-              <circle cx={activeX} cy={activeY} r="4.5" fill="rgb(var(--c-accent))" stroke="rgb(var(--c-bg))" strokeWidth="2" />
-            </g>
-          )}
-        </svg>
-        {active !== null && (
-          <div
-            className="pointer-events-none absolute z-10 -translate-x-1/2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-center shadow-md"
-            style={{ left: `${(tooltipLeft / width) * 100}%`, top: 6 }}
-          >
-            <p className="font-mono text-[10.5px] text-muted">
-              {hourLabel(bucketStart(active))} – {hourLabel(new Date(bucketStart(active).getTime() + 3_600_000))}
-            </p>
-            <p className="text-[12px] font-semibold text-text">
-              {formatNumber(data[active])} <span className="font-normal text-muted">requests</span>
-            </p>
-          </div>
-        )}
-      </div>
+        </div>
       </div>
       <div className="mt-1 flex justify-between font-mono text-[10.5px] text-muted">
-        {ticks.map((i) => (
-          <span key={i}>{i === data.length - 1 ? 'Now' : hourLabel(bucketStart(i))}</span>
+        {tickIdx.map((i) => (
+          <span key={i}>{bucketLabel(data[i].start, bucketSec, i === last)}</span>
         ))}
       </div>
-      {total === 0 ? (
+      {totals.requests === 0 ? (
         <p className="mt-2 text-[11.5px] text-muted">
-          No traffic in the last 24 hours. Send a request through the gateway and it will appear here.
+          No traffic in the last {range}. Send a request through the gateway and it will appear here.
         </p>
       ) : (
-        <p className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-muted">
+        <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11.5px] text-muted sm:grid-cols-5">
           <span>
-            Total <span className="font-semibold text-text">{formatNumber(total)}</span>
+            Total <span className="font-semibold text-text">{formatNumber(totals.requests)}</span>
           </span>
-          <span aria-hidden>·</span>
           <span>
-            Peak <span className="font-semibold text-text">{formatNumber(peak)}</span> at {hourLabel(bucketStart(peakIdx))}
+            Peak <span className="font-semibold text-text">{yLabel(peak)}</span>
+            {peakIdx >= 0 ? ` at ${bucketLabel(data[peakIdx].start, bucketSec, false)}` : ''}
           </span>
-          <span aria-hidden>·</span>
           <span>
-            Avg <span className="font-semibold text-text">{avgPerHour.toFixed(1)}</span>/hr
+            Avg{' '}
+            <span className="font-semibold text-text">
+              {metric === 'latency' ? formatLatency(avgLat) : (totals.requests / Math.max(1, data.length)).toFixed(bucketSec >= 86400 ? 0 : 1)}
+            </span>
+            {perLabel}
           </span>
-        </p>
+          <span>
+            Tokens <span className="font-semibold text-text">{formatCompact(totals.tokens)}</span>
+          </span>
+          <span className="flex items-center gap-1.5">
+            {badTotal > 0 && (
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-[rgb(var(--c-danger))] opacity-70" />
+                <span className="font-semibold text-text">{formatNumber(totals.failed)}</span>
+                <span className="inline-block h-2 w-2 rounded-full bg-[rgb(var(--c-warning))] opacity-70" />
+                <span className="font-semibold text-text">{formatNumber(totals.blocked)}</span>
+                <span>bad</span>
+              </>
+            )}
+            {badTotal === 0 && (
+              <span>
+                Failed <span className="font-semibold text-success">0</span>
+              </span>
+            )}
+          </span>
+        </div>
       )}
+      {loading && <p className="mt-1 text-[10.5px] text-muted">Refreshing {range}…</p>}
     </div>
   );
 }
@@ -219,6 +377,15 @@ export function DashboardPage() {
     { cacheKey: 'overview', refreshMs: 15000 },
   );
   const { data: live } = useQuery(() => admin.live(), { cacheKey: 'live', refreshMs: 2000 });
+  // Chart range switcher (24h / 3d / 7d). Each range has its own cache entry,
+  // so switching back is instant and the per-bucket aggregates (ok/failed/
+  // blocked/fallbacks/tokens/latency) come from /overview/series for the range.
+  const [rangeId, setRangeId] = useState<RangeId>('24h');
+  const [metricId, setMetricId] = useState<MetricId>('requests');
+  const { data: seriesRes, loading: seriesLoading } = useQuery(() => admin.series(rangeId), {
+    cacheKey: `series-${rangeId}`,
+    refreshMs: 30000,
+  });
   const load = reload;
   const [quickKey, setQuickKey] = useState('');
   const [generating, setGenerating] = useState(false);
@@ -322,15 +489,58 @@ export function DashboardPage() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         <Card className="lg:col-span-7">
           <CardHeader
-            title="Requests (24h)"
-            description="Hourly request throughput across active routes. Hover or use arrow keys for per-hour detail."
+            title={`Requests (${rangeId})`}
+            description={
+              rangeId === '24h'
+                ? 'Hourly request throughput across active routes. Hover or use arrow keys for per-hour detail.'
+                : 'Daily request throughput across active routes. Hover or use arrow keys for per-day detail.'
+            }
             actions={
-              <div className="inline-flex rounded-control border border-border bg-surface p-0.5">
-                <span className="rounded-[6px] bg-bg px-2.5 py-0.5 text-[11px] font-semibold text-text">24h</span>
+              <div className="flex items-center gap-2">
+                <div className="inline-flex rounded-control border border-border bg-surface p-0.5" role="tablist" aria-label="Chart metric">
+                  {METRICS.map((mt) => (
+                    <button
+                      key={mt.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={metricId === mt.id}
+                      onClick={() => setMetricId(mt.id)}
+                      className={
+                        'rounded-[6px] px-2.5 py-0.5 text-[11px] font-semibold transition-colors ' +
+                        (metricId === mt.id ? 'bg-bg text-text' : 'text-muted hover:text-text')
+                      }
+                    >
+                      {mt.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="inline-flex rounded-control border border-border bg-surface p-0.5" role="tablist" aria-label="Chart range">
+                  {RANGES.map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={rangeId === r.id}
+                      onClick={() => setRangeId(r.id)}
+                      className={
+                        'rounded-[6px] px-2.5 py-0.5 text-[11px] font-semibold transition-colors ' +
+                        (rangeId === r.id ? 'bg-bg text-text' : 'text-muted hover:text-text')
+                      }
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             }
           />
-          <RequestChart series={data.series} />
+          <SeriesChart
+            points={seriesRes?.data ?? []}
+            bucketSec={seriesRes?.bucket_sec ?? RANGES.find((r) => r.id === rangeId)!.bucket}
+            range={rangeId}
+            metric={metricId}
+            loading={seriesLoading}
+          />
         </Card>
 
         <Card className="lg:col-span-5">
