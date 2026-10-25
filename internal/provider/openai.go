@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"context"
 	"encoding/json"
 	"errors"
@@ -267,6 +268,16 @@ func extractMessage(body []byte) string {
 		}
 	}
 	return truncate(strings.TrimSpace(string(body)), 300)
+}
+
+// errorMessage ensures a surfaced upstream error always carries context, even
+// when the upstream sent an empty or unparseable error body.
+func errorMessage(status int, msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return fmt.Sprintf("upstream returned HTTP %d (no detail)", status)
+	}
+	return msg
 }
 
 // classifyTransport maps Go transport errors into fallback categories.

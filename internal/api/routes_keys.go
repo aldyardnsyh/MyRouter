@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -54,6 +55,23 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	if strings.TrimSpace(req.Primary) == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_input", "primary model is required")
 		return
+	}
+	// Validate model references before touching the DB: route_target.model_id
+	// is a foreign key, and an unknown id would otherwise surface as a raw
+	// 500 save_failed instead of a meaningful client error.
+	ids := []string{strings.TrimSpace(req.Primary)}
+	ids = append(ids, req.Fallbacks...)
+	validated := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || validated[id] {
+			continue
+		}
+		if _, err := s.db.ModelByID(id); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_input",
+				fmt.Sprintf("unknown model id %q: run model discovery on the provider first", id))
+			return
+		}
+		validated[id] = true
 	}
 	if _, err := s.db.RouteByAlias(req.Alias); err == nil {
 		writeErr(w, http.StatusConflict, "duplicate_alias", "a route with this alias already exists")
@@ -151,6 +169,20 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request, _ *au
 		}
 	}
 	if strings.TrimSpace(req.Primary) != "" {
+		ids := []string{strings.TrimSpace(req.Primary)}
+		ids = append(ids, req.Fallbacks...)
+		validated := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			if id == "" || validated[id] {
+				continue
+			}
+			if _, err := s.db.ModelByID(id); err != nil {
+				writeErr(w, http.StatusBadRequest, "invalid_input",
+					fmt.Sprintf("unknown model id %q: run model discovery on the provider first", id))
+				return
+			}
+			validated[id] = true
+		}
 		targets := []model.RouteTarget{{ModelID: req.Primary, Role: "primary", Position: 0}}
 		seen := map[string]bool{req.Primary: true}
 		pos := 1

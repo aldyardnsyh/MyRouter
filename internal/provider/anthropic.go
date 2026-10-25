@@ -231,7 +231,7 @@ func (a *AnthropicAdapter) StreamChat(ctx context.Context, creds Credentials, mo
 
 // MapError implements BaseProvider.
 func (a *AnthropicAdapter) MapError(status int, body []byte) *Error {
-	msg := extractMessage(body)
+	msg := errorMessage(status, extractMessage(body))
 	switch {
 	case status == http.StatusTooManyRequests:
 		return &Error{Category: CatRateLimit, StatusCode: status, Message: msg}
