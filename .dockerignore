@@ -1,0 +1,45 @@
+# Version control & editor noise
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+*.swp
+
+# Node build artefacts — web/dist is always rebuilt inside the image so a
+# stale committed bundle can never leak into a release build.
+web/node_modules
+web/dist
+**/node_modules
+
+# Local runtime state: never bake the database or master key into an image
+data
+data/
+*.db
+*.db-shm
+*.db-wal
+master.key
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/myrouter
+myrouter
+
+# Docs, design assets and local tooling are not needed to build
+docs
+stitch_myrouter_ai_gateway_ui_kit
+*.md
+
+# Docker / CI descriptors
+Dockerfile
+.dockerignore
+.github
+docker-compose*.yml
+
+# Misc
+*.log
+tmp
+.tmp

@@ -1,0 +1,38 @@
+﻿# --- Local runtime state (NEVER commit) ---
+data/
+data*/
+*.db
+*.db-shm
+*.db-wal
+master.key
+*.token
+.env
+.env.*
+secrets*
+
+# --- Build artefacts ---
+*.tsbuildinfo
+web/node_modules/
+node_modules/
+web/dist/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+/myrouter
+qa-artifacts/
+*.log
+*.bundle
+
+# --- Private planning / audit artefacts (developer machine only) ---
+docs/
+MyRouter PRD*.md
+stitch_myrouter_ai_gateway_ui_kit/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
