@@ -187,7 +187,7 @@ func ParseChat(body []byte) (*ChatInput, error) {
 			if in.System != "" {
 				in.System += "\n\n"
 			}
-			in.System += m.Content
+			in.System += m.Text()
 		}
 	}
 	return in, nil

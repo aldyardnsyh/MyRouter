@@ -77,7 +77,7 @@ func (g *Gateway) preparePlayground(ctx context.Context, req PlaygroundRequest) 
 
 	messages := make([]provider.ChatMessage, 0, len(req.Messages)+1)
 	if s := strings.TrimSpace(req.System); s != "" {
-		messages = append(messages, provider.ChatMessage{Role: "system", Content: s})
+		messages = append(messages, provider.NewTextMessage("system", s))
 	}
 	messages = append(messages, req.Messages...)
 	if len(messages) == 0 {

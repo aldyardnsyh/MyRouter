@@ -4,6 +4,8 @@
 package provider
 
 import (
+	"strings"
+	"encoding/json"
 	"context"
 	"errors"
 	"net/http"
@@ -70,9 +72,57 @@ func AsError(err error) *Error {
 }
 
 // ChatMessage is a provider-neutral chat message.
+//
+// Content is kept as raw JSON because OpenAI-compatible clients send either a
+// plain string or an array of typed parts (text, image_url, input_audio).
+// ToolCallID is required when Role is "tool": the Responses API needs it as
+// function_call_output.call_id, and dropping it makes upstreams reject the
+// whole conversation.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+}
+
+// Text returns the message content as plain text. Array content is flattened
+// by concatenating its text parts, ignoring non-text parts.
+func (m ChatMessage) Text() string {
+	raw := strings.TrimSpace(string(m.Content))
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if json.Unmarshal(m.Content, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(m.Content, &parts) == nil {
+		var b strings.Builder
+		for _, p := range parts {
+			if p.Text != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(p.Text)
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
+// NewTextMessage builds a message with plain string content.
+func NewTextMessage(role, content string) ChatMessage {
+	b, _ := json.Marshal(content)
+	return ChatMessage{Role: role, Content: b}
 }
 
 // ChatRequest is the normalized inbound request.

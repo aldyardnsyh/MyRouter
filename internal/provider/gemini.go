@@ -96,7 +96,7 @@ func geminiBody(req ChatRequest) map[string]any {
 			if systemText != "" {
 				systemText += "\n\n"
 			}
-			systemText += m.Content
+			systemText += m.Text()
 			continue
 		}
 		role := "user"

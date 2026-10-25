@@ -104,7 +104,7 @@ func runChat(t *testing.T, g *Gateway, keySecret string) *Outcome {
 	t.Helper()
 	prep := &PreparedRequest{
 		RequestID: "req1",
-		Input:     &ChatInput{Model: "coding", Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}}},
+		Input:     &ChatInput{Model: "coding", Messages: []provider.ChatMessage{provider.NewTextMessage("user", "hi")}},
 		Route:     &model.Route{ID: "", Alias: "coding"},
 		APIKey:    &model.APIKey{ID: "key1", Enabled: true},
 		IP:        "1.2.3.4", EstTokens: 10, Started: time.Now(),
@@ -236,7 +236,7 @@ func TestStreamingOutlivesAttemptContext(t *testing.T) {
 
 	prep := &PreparedRequest{
 		RequestID: "req-stream",
-		Input:     &ChatInput{Model: "streaming", Stream: true, Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}}},
+		Input:     &ChatInput{Model: "streaming", Stream: true, Messages: []provider.ChatMessage{provider.NewTextMessage("user", "hi")}},
 		Route:     route,
 		APIKey:    &model.APIKey{ID: "ks", Enabled: true},
 		IP:        "1.2.3.4", EstTokens: 10, Started: time.Now(),
@@ -267,7 +267,7 @@ func TestPlaygroundNonStream(t *testing.T) {
 	g, _, _ := newTestGateway(t, "ok", "ok")
 	res, err := g.Playground(context.Background(), PlaygroundRequest{
 		Route:     "coding",
-		Messages:  []provider.ChatMessage{{Role: "user", Content: "ping"}},
+		Messages:  []provider.ChatMessage{provider.NewTextMessage("user", "ping")},
 		MaxTokens: 64,
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func TestPlaygroundFallsBack(t *testing.T) {
 	g, _, _ := newTestGateway(t, "429", "ok")
 	res, err := g.Playground(context.Background(), PlaygroundRequest{
 		Route:    "coding",
-		Messages: []provider.ChatMessage{{Role: "user", Content: "ping"}},
+		Messages: []provider.ChatMessage{provider.NewTextMessage("user", "ping")},
 	})
 	if err != nil {
 		t.Fatalf("playground: %v", err)
@@ -301,7 +301,7 @@ func TestPlaygroundFallsBack(t *testing.T) {
 func TestPlaygroundUnknownRoute(t *testing.T) {
 	g, _, _ := newTestGateway(t, "ok", "ok")
 	if _, err := g.Playground(context.Background(), PlaygroundRequest{
-		Route: "nope", Messages: []provider.ChatMessage{{Role: "user", Content: "x"}},
+		Route: "nope", Messages: []provider.ChatMessage{provider.NewTextMessage("user", "x")},
 	}); err == nil {
 		t.Fatal("expected an error for an unknown route")
 	}

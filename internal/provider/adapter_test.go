@@ -18,7 +18,7 @@ func TestChatMapsNon2xx(t *testing.T) {
 
 	a := NewCompatible(nil)
 	_, err := a.Chat(context.Background(), Credentials{BaseURL: srv.URL, APIKey: "k"}, "gpt-test", ChatRequest{
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: []ChatMessage{NewTextMessage("user", "hi")},
 	})
 	if err == nil {
 		t.Fatal("expected error for 429 upstream")
@@ -38,7 +38,7 @@ func TestChatSuccessRoundTrip(t *testing.T) {
 
 	a := NewCompatible(nil)
 	resp, err := a.Chat(context.Background(), Credentials{BaseURL: srv.URL}, "m", ChatRequest{
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: []ChatMessage{NewTextMessage("user", "hi")},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -58,7 +58,7 @@ func TestFallbackEligibleEndToEnd(t *testing.T) {
 
 	a := NewCompatible(nil)
 	_, err := a.Chat(context.Background(), Credentials{BaseURL: srv.URL}, "m", ChatRequest{
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: []ChatMessage{NewTextMessage("user", "hi")},
 	})
 	pe := AsError(err)
 	if !FallbackEligible(pe.Category) {
