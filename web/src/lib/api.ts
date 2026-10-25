@@ -218,6 +218,7 @@ export const admin = {
   routes: {
     list: () => api<{ data: import('./types').Route[] }>('/routes'),
     create: (body: unknown) => api<{ data: import('./types').Route }>('/routes', { method: 'POST', body }),
+    auto: () => api<{ created: number; skipped: number; data: import('./types').Route[] }>('/routes/auto', { method: 'POST', body: {} }),
     update: (id: string, body: unknown) => api<{ data: import('./types').Route }>(`/routes/${id}`, { method: 'PATCH', body }),
     remove: (id: string) => api<{ ok: boolean }>(`/routes/${id}`, { method: 'DELETE' }),
   },

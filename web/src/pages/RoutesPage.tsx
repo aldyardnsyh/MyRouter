@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { GripVertical, Plus, Route as RouteIcon, X } from 'lucide-react';
+import { GripVertical, Plus, Route as RouteIcon, X, Zap } from 'lucide-react';
 import { PageHeader, StatCard, Card, CardHeader, EmptyState } from '../components/ui/Layout';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
@@ -22,6 +22,8 @@ const fallbackConditions = [
 interface EditorState {
   id?: string;
   alias: string;
+  /** True while `alias` is an auto-suggestion from the picked model. */
+  aliasAuto: boolean;
   description: string;
   primary: string;
   fallbacks: string[];
@@ -33,6 +35,7 @@ interface EditorState {
 
 const emptyEditor: EditorState = {
   alias: '',
+  aliasAuto: false,
   description: '',
   primary: '',
   fallbacks: [],
@@ -41,6 +44,18 @@ const emptyEditor: EditorState = {
   policy_id: '',
   fallback_on: ['rate_limit', 'timeout', 'upstream_5xx', 'network'],
 };
+
+// Same normalization as the backend autoAlias: lowercase, invalid chars to
+// dashes, trimmed — keeps manual and auto-created routes visually consistent.
+function suggestAlias(modelID: string) {
+  const a = modelID
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 64)
+    .replace(/[-.]+$/, '');
+  return a || modelID.toLowerCase().slice(0, 64) || '';
+}
 
 export function RoutesPage() {
   const toast = useToast();
@@ -55,6 +70,8 @@ export function RoutesPage() {
   const [formError, setFormError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<Route | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [confirmAuto, setConfirmAuto] = useState(false);
+  const [autoAdding, setAutoAdding] = useState(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -84,7 +101,13 @@ export function RoutesPage() {
   );
 
   function openCreate() {
-    setEditor({ ...emptyEditor, primary: models[0]?.id ?? '' });
+    const first = models[0];
+    setEditor({
+      ...emptyEditor,
+      primary: first?.id ?? '',
+      alias: first ? suggestAlias(first.model_id) : '',
+      aliasAuto: !!first,
+    });
     setFormError('');
     setDrawerOpen(true);
   }
@@ -94,6 +117,7 @@ export function RoutesPage() {
     setEditor({
       id: route.id,
       alias: route.alias,
+      aliasAuto: false,
       description: route.description,
       primary: primary?.model_id ?? '',
       fallbacks: fallbacksOf(route).map((f) => f.model_id),
@@ -150,6 +174,27 @@ export function RoutesPage() {
       await load(true);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Update failed');
+    }
+  }
+
+  // One-click setup: a route per discovered provider model with defaults
+  // (alias = model id, no fallbacks, global policy). Idempotent — existing
+  // aliases are skipped, so it is safe after every new provider/discovery.
+  async function autoAdd() {
+    setAutoAdding(true);
+    try {
+      const res = await admin.routes.auto();
+      toast.success(
+        res.created
+          ? `${res.created} route${res.created > 1 ? 's' : ''} created${res.skipped ? `, ${res.skipped} skipped (existing)` : ''}`
+          : 'No new routes to add — all discovered models already have routes',
+      );
+      setConfirmAuto(false);
+      await load(true);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Auto-add failed');
+    } finally {
+      setAutoAdding(false);
     }
   }
 
@@ -245,9 +290,21 @@ export function RoutesPage() {
         title="Routes"
         description="Virtual model aliases with ordered fallback chains across providers."
         actions={
-          <Button variant="primary" size="compact" icon={<Plus size={14} />} onClick={openCreate}>
-            Create Route
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              size="compact"
+              icon={<Zap size={14} />}
+              loading={autoAdding}
+              onClick={() => setConfirmAuto(true)}
+              disabled={models.length === 0}
+            >
+              Auto-add routes
+            </Button>
+            <Button variant="primary" size="compact" icon={<Plus size={14} />} onClick={openCreate}>
+              Create Route
+            </Button>
+          </>
         }
       />
 
@@ -313,7 +370,7 @@ export function RoutesPage() {
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Alias" required hint="Sent as `model` by clients.">
-              <Input mono value={editor.alias} onChange={(e) => setEditor({ ...editor, alias: e.target.value })} placeholder="coding" />
+              <Input mono value={editor.alias} onChange={(e) => setEditor({ ...editor, alias: e.target.value, aliasAuto: false })} placeholder="coding" />
             </Field>
             <Field label="Guard policy">
               <Select value={editor.policy_id} onChange={(e) => setEditor({ ...editor, policy_id: e.target.value })}>
@@ -330,7 +387,22 @@ export function RoutesPage() {
           </Field>
 
           <Field label="Primary model" required>
-            <Select value={editor.primary} onChange={(e) => setEditor({ ...editor, primary: e.target.value, fallbacks: editor.fallbacks.filter((f) => f !== e.target.value) })}>
+            <Select
+              value={editor.primary}
+              onChange={(e) => {
+                const m = models.find((x) => x.id === e.target.value);
+                setEditor((prev) => ({
+                  ...prev,
+                  primary: e.target.value,
+                  // Suggest the alias from the chosen model so creating a
+                  // route is one pick instead of typing a name manually.
+                  // Only when the alias is empty or was an earlier suggestion.
+                  alias: !prev.alias || prev.aliasAuto ? (m ? suggestAlias(m.model_id) : prev.alias) : prev.alias,
+                  aliasAuto: !!m && (!prev.alias || prev.aliasAuto),
+                  fallbacks: prev.fallbacks.filter((f) => f !== e.target.value),
+                }));
+              }}
+            >
               <option value="">Select a model…</option>
               {models.map((m) => (
                 <option key={m.id} value={m.id}>{m.provider_name} · {m.model_id}</option>
@@ -423,6 +495,16 @@ export function RoutesPage() {
           {formError && <p className="text-[12px] text-danger">{formError}</p>}
         </div>
       </Drawer>
+
+      <ConfirmDialog
+        open={confirmAuto}
+        onClose={() => setConfirmAuto(false)}
+        onConfirm={() => void autoAdd()}
+        title="Auto-add routes"
+        message={`Create one route per discovered model (${models.length} available) with defaults: alias = model id, no fallbacks, global policy. Existing routes are kept. You can edit or delete them later.`}
+        confirmLabel={`Add ${models.length} routes`}
+        loading={autoAdding}
+      />
 
       <ConfirmDialog
         open={!!confirmDelete}

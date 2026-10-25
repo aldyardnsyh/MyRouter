@@ -156,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	// Routes.
 	mux.HandleFunc("GET /admin/routes", s.withAuth(s.handleListRoutes))
 	mux.HandleFunc("POST /admin/routes", s.withAuth(s.handleCreateRoute))
+	mux.HandleFunc("POST /admin/routes/auto", s.withAuth(s.handleAutoRoutes))
 	mux.HandleFunc("PATCH /admin/routes/{id}", s.withAuth(s.handleUpdateRoute))
 	mux.HandleFunc("DELETE /admin/routes/{id}", s.withAuth(s.handleDeleteRoute))
 

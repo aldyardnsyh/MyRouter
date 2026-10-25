@@ -119,6 +119,102 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	writeJSON(w, http.StatusCreated, map[string]any{"data": saved})
 }
 
+// autoAlias converts a provider model id into a valid route alias: lowercase,
+// invalid chars collapsed to dashes, trimmed to the alias pattern's 64 chars.
+// Suffixes -2, -3… are appended when the alias is taken, so a single bulk run
+// never fails on collisions (e.g. the same model id on two providers).
+func autoAlias(modelID string, taken func(string) bool) string {
+	base := strings.ToLower(strings.TrimSpace(modelID))
+	var b strings.Builder
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	alias := strings.Trim(b.String(), "-")
+	if alias == "" {
+		alias = "model"
+	}
+	if len(alias) > 64 {
+		alias = alias[:64]
+	}
+	alias = strings.TrimRight(alias, "-.")
+	if !aliasPattern.MatchString(alias) {
+		alias = "model"
+	}
+	if !taken(alias) {
+		return alias
+	}
+	for i := 2; i < 100; i++ {
+		cand := fmt.Sprintf("%s-%d", alias, i)
+		if len(cand) > 64 {
+			cand = cand[:64]
+		}
+		if !taken(cand) {
+			return cand
+		}
+	}
+	return ""
+}
+
+// handleAutoRoutes creates one route per discovered provider model with
+// sensible defaults (alias = model id, primary = that model, global policy).
+// Existing aliases are skipped, so the action is idempotent and safe to click
+// repeatedly after adding new providers or re-running model discovery.
+func (s *Server) handleAutoRoutes(w http.ResponseWriter, r *http.Request, _ *authSession) {
+	models, err := s.db.ListModels()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	created := make([]*model.Route, 0, len(models))
+	skipped := 0
+	for _, m := range models {
+		if !m.Available {
+			skipped++
+			continue
+		}
+		alias := autoAlias(m.ModelID, func(a string) bool {
+			if _, err := s.db.RouteByAlias(a); err == nil {
+				return true
+			}
+			for _, c := range created {
+				if c.Alias == a {
+					return true
+				}
+			}
+			return false
+		})
+		if alias == "" {
+			skipped++
+			continue
+		}
+		prov := m.ProviderName
+		if prov == "" {
+			prov = m.ProviderID
+		}
+		rt := &model.Route{
+			Alias:       alias,
+			Description: fmt.Sprintf("Auto-added · %s", prov),
+			Enabled:     true,
+			Strategy:    "priority",
+			Retry:       1,
+			TimeoutMS:   30000,
+			FallbackOn:  "rate_limit,timeout,upstream_5xx,network",
+			Targets:     []model.RouteTarget{{ModelID: m.ID, Role: "primary", Position: 0}},
+		}
+		if err := s.db.SaveRoute(rt); err != nil {
+			writeErr(w, http.StatusInternalServerError, "save_failed", err.Error())
+			return
+		}
+		created = append(created, rt)
+	}
+	writeOK(w, map[string]any{"created": len(created), "skipped": skipped, "data": created})
+}
+
 func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request, _ *authSession) {
 	existing, err := s.db.RouteByID(s.pathID(r))
 	if err != nil {
