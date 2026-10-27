@@ -136,6 +136,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	// A fresh process means a fresh login. Sessions persisted in SQLite would
+	// otherwise let a browser tab (or a stale cookie) re-enter the dashboard
+	// after the app was quit and reopened, which is not what "quit" implies.
+	if n, err := db.DeleteAllSessions(); err != nil {
+		log.Warn("could not clear stale admin sessions", logx.F("error", err.Error()))
+	} else if n > 0 {
+		log.Info("cleared admin sessions from the previous run", logx.F("sessions", n))
+	}
 	// One-time browser cache eviction after an upgrade (see uicache.go).
 	initUICache(cfg.DataDir, version)
 
@@ -176,7 +184,10 @@ func main() {
 	})
 	admin := api.New(api.Deps{
 		DB: db, Box: box, Registry: registry, Guard: engine, Gateway: gw, Identity: identity, Log: log,
-		Config:  api.ServerConfig{Version: version, AllowPrivate: allowPrivate, DevMode: cfg.DevMode},
+		Config: api.ServerConfig{
+			Version: version, AllowPrivate: allowPrivate, DevMode: cfg.DevMode,
+			Addr: cfg.Addr, DataDir: cfg.DataDir,
+		},
 		Catalog: modelCatalog,
 	})
 

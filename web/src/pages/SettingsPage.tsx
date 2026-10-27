@@ -6,7 +6,7 @@ import { Button } from '../components/ui/Button';
 import { Input, Select, Field, Switch } from '../components/ui/Field';
 import { CopyField } from '../components/ui/CopyField';
 import { useToast } from '../components/ui/Toast';
-import { admin, ApiError } from '../lib/api';
+import { admin, ApiError, type OpenCodeStatus } from '../lib/api';
 import { useTheme } from '../lib/theme';
 import type { SettingsMap } from '../lib/types';
 import { classNames } from '../lib/format';
@@ -35,13 +35,22 @@ export function SettingsPage() {
   const [pendingImport, setPendingImport] = useState<{ name: string; parsed: unknown } | null>(null);
   const [importing, setImporting] = useState(false);
   const importInput = useRef<HTMLInputElement | null>(null);
+  const [opencode, setOpencode] = useState<OpenCodeStatus | null>(null);
+  const [opencodeError, setOpencodeError] = useState('');
+  const [syncKey, setSyncKey] = useState('');
+  const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const res = await admin.settings.get();
+      const [res, oc] = await Promise.all([
+        admin.settings.get(),
+        admin.opencode.status().catch(() => null),
+      ]);
       setSettings(res.data);
       setVersion(res.version);
+      setOpencode(oc?.data ?? null);
+      setOpencodeError(oc?.error ?? '');
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load settings');
@@ -64,6 +73,27 @@ export function SettingsPage() {
       toast.error(err instanceof ApiError ? err.message : 'Save failed');
       await load(true);
     } finally {
+    }
+  }
+
+  async function syncOpencode() {
+    setSyncing(true);
+    try {
+      const res = await admin.opencode.sync({ api_key: syncKey.trim() || undefined });
+      const added = res.data.added.length;
+      toast.success(
+        added > 0
+          ? `${added} model ditambahkan ke OpenCode. Restart OpenCode agar muncul di picker.`
+          : 'OpenCode sudah memuat semua route. Restart OpenCode kalau baru mengganti key.',
+      );
+      setSyncKey('');
+      const st = await admin.opencode.status();
+      setOpencode(st.data);
+      setOpencodeError(st.error ?? '');
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Sync ke OpenCode gagal');
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -245,8 +275,73 @@ export function SettingsPage() {
                     <Input mono value={settings.trusted_proxies} onChange={(e) => setSettings({ ...settings, trusted_proxies: e.target.value })} onBlur={(e) => void save({ trusted_proxies: e.target.value })} placeholder="10.0.0.0/8, 172.17.0.1" />
                   </Field>
                   <Callout tone="warning">
-                    If the direct peer is not a trusted proxy, X-Forwarded-For is ignored — this prevents IP spoofing and Guard bypass.
+                    If the direct peer is not a trusted proxy, X-Forwarded-For is ignored, this prevents IP spoofing and Guard bypass.
                   </Callout>
+                </div>
+              </Card>
+              <Card>
+                <CardHeader
+                  title="OpenCode integration"
+                  description="Write every enabled route into the OpenCode config so new models show up in its picker."
+                />
+                <div className="flex flex-col gap-3">
+                  <div className="rounded-control border border-border bg-surface px-3 py-2.5">
+                    <p className="text-[11.5px] text-muted">Config file</p>
+                    <p className="mt-0.5 break-all font-mono text-[11.5px] text-text">
+                      {opencode?.path || 'Not detected'}
+                    </p>
+                  </div>
+                  {opencode && (
+                    <>
+                      <dl className="grid grid-cols-2 gap-3 text-[12.5px] sm:grid-cols-3">
+                        <div>
+                          <dt className="text-muted">Routes ready</dt>
+                          <dd className="mt-0.5 font-mono text-text">{opencode.route_models.length}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted">In OpenCode</dt>
+                          <dd className="mt-0.5 font-mono text-text">{opencode.config_models.length}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted">API key</dt>
+                          <dd className="mt-0.5 text-text">{opencode.api_key_configured ? 'configured' : 'missing'}</dd>
+                        </div>
+                      </dl>
+                      <p className="text-[11.5px] text-muted">
+                        Instance {opencode.listen_addr || 'unknown'}, data dir {opencode.data_dir || 'unknown'}
+                      </p>
+                    </>
+                  )}
+                  {opencodeError && <Callout tone="warning">{opencodeError}</Callout>}
+                  {opencode && opencode.missing.length > 0 && (
+                    <Callout tone="warning">
+                      {opencode.missing.length} route belum ada di OpenCode:{' '}
+                      <span className="font-mono">{opencode.missing.join(', ')}</span>
+                    </Callout>
+                  )}
+                  <Field
+                    label="API key (optional)"
+                    hint="Only fill this to replace the apiKey in the config. A secret is shown once when the key is created."
+                  >
+                    <Input
+                      type="password"
+                      value={syncKey}
+                      onChange={(e) => setSyncKey(e.target.value)}
+                      placeholder="mr-sk-..."
+                    />
+                  </Field>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="primary"
+                      size="compact"
+                      loading={syncing}
+                      disabled={!opencode?.writable}
+                      onClick={() => void syncOpencode()}
+                    >
+                      Sync to OpenCode
+                    </Button>
+                    <span className="text-[11.5px] text-muted">Restart OpenCode after a sync to load new models.</span>
+                  </div>
                 </div>
               </Card>
             </>

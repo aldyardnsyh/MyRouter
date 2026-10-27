@@ -413,7 +413,7 @@ func streamFromJSONBody(body io.ReadCloser) (<-chan StreamEvent, error) {
 
 // MapError maps HTTP statuses to the normalized taxonomy.
 func (a *OpenAIAdapter) MapError(status int, body []byte) *Error {
-	msg := extractMessage(body)
+	msg := errorMessage(status, extractMessage(body))
 	switch {
 	case status == http.StatusTooManyRequests:
 		return &Error{Category: CatRateLimit, StatusCode: status, Message: msg}
@@ -466,6 +466,11 @@ func marshalToolCalls(acc map[int]*toolCallAccum) json.RawMessage {
 }
 
 // extractMessage pulls a human-readable message out of an error body.
+//
+// Upstreams behind a CDN or load balancer often answer with a full HTML error
+// page instead of JSON. Echoing that markup to a client (or storing it in the
+// request log) produces the raw-document dump users see in their editor, so an
+// HTML body is reduced to its <title> and never returned verbatim.
 func extractMessage(body []byte) string {
 	var obj struct {
 		Error struct {
@@ -475,14 +480,81 @@ func extractMessage(body []byte) string {
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &obj); err == nil {
-		if obj.Error.Message != "" {
-			return obj.Error.Message
+		if msg := collapseWhitespace(obj.Error.Message); msg != "" {
+			return msg
 		}
-		if obj.Message != "" {
-			return obj.Message
+		if msg := collapseWhitespace(obj.Message); msg != "" {
+			return msg
 		}
 	}
-	return truncate(strings.TrimSpace(string(body)), 300)
+	raw := strings.TrimSpace(string(body))
+	if looksLikeHTML(raw) {
+		if title := htmlTitle(raw); title != "" {
+			return "upstream sent an HTML error page: " + truncate(title, 120)
+		}
+		return "upstream sent an HTML error page"
+	}
+	return truncate(collapseWhitespace(raw), 300)
+}
+
+// looksLikeHTML reports whether a body is a markup document rather than an API
+// payload. Only the leading bytes are inspected: an error page always starts
+// with a doctype or a tag.
+func looksLikeHTML(s string) bool {
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "" {
+		return false
+	}
+	for _, prefix := range []string{"<!doctype", "<html", "<?xml", "<head", "<body", "<title"} {
+		if strings.HasPrefix(t, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(t, "<html") && strings.Contains(t, "</html>")
+}
+
+// htmlTitle extracts the document title so the caller can keep the useful part
+// of an error page (e.g. "opencode.ai | 502: Bad gateway").
+func htmlTitle(s string) string {
+	lower := strings.ToLower(s)
+	start := strings.Index(lower, "<title")
+	if start < 0 {
+		return ""
+	}
+	rest := s[start:]
+	open := strings.Index(rest, ">")
+	if open < 0 {
+		return ""
+	}
+	rest = rest[open+1:]
+	if end := strings.Index(strings.ToLower(rest), "</title>"); end >= 0 {
+		rest = rest[:end]
+	} else {
+		return ""
+	}
+	return truncate(collapseWhitespace(rest), 120)
+}
+
+// collapseWhitespace flattens a message onto one line and drops control bytes,
+// so a multi-line upstream body cannot break client error rendering.
+func collapseWhitespace(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case r == ' ' || r == '\n' || r == '\r' || r == '\t':
+			space = true
+		case r < 0x20 || r == 0x7f:
+			// Drop other control characters.
+		default:
+			if space && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			space = false
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // errorMessage ensures a surfaced upstream error always carries context, even

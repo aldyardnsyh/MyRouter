@@ -356,7 +356,7 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 			attempt++
 			continue
 		}
-		if allowed, cooldownCat := g.breaker.allow(prov.ID); !allowed {
+		if allowed, cooldownCat := g.breaker.allow(prov.ID, mdl.ModelID); !allowed {
 			lastCooldown = &provider.Error{
 				Category: cooldownCat,
 				Message:  "provider cooling down after " + string(cooldownCat),
@@ -403,7 +403,7 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 				out.Fallback = idx > 0
 				out.Latency = latency
 				out.Err = nil // a later target succeeded; clear earlier failures
-				g.breaker.success(prov.ID)
+				g.breaker.success(prov.ID, mdl.ModelID)
 				return out, nil
 			}
 			cancel()
@@ -414,7 +414,7 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 				Category: string(perr.Category), StatusCode: perr.StatusCode,
 				LatencyMS: latency.Milliseconds(), Message: perr.Message,
 			})
-			g.breaker.fail(prov.ID, perr.Category)
+			g.breaker.fail(prov.ID, mdl.ModelID, perr.Category)
 			if !provider.FallbackEligible(perr.Category) || !eligible[string(perr.Category)] {
 				out.Err = perr
 				out.Model = mdl

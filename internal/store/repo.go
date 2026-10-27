@@ -117,6 +117,17 @@ func (db *DB) PurgeSessions(now int64) error {
 	return err
 }
 
+// DeleteAllSessions removes every admin session and reports how many rows were
+// deleted. Startup uses it so a restart always requires a fresh login: a cookie
+// left over from the previous run must not walk straight into the console.
+func (db *DB) DeleteAllSessions() (int64, error) {
+	res, err := db.Exec(`DELETE FROM session`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ---------------------------------------------------------------------------
 // Providers & credentials
 // ---------------------------------------------------------------------------

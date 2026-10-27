@@ -91,6 +91,34 @@ export interface ConfigExport {
   policies: Record<string, unknown>[];
 }
 
+/** State of the OpenCode config file MyRouter can write to. */
+export interface OpenCodeStatus {
+  path: string;
+  exists: boolean;
+  writable: boolean;
+  provider_id: string;
+  provider_found: boolean;
+  base_url: string;
+  config_models: string[];
+  route_models: string[];
+  /** Routes that exist in MyRouter but not yet in the OpenCode config. */
+  missing: string[];
+  /** Models declared in OpenCode that no longer have a route. */
+  stale: string[];
+  api_key_configured: boolean;
+  listen_addr: string;
+  data_dir: string;
+}
+
+export interface OpenCodeSyncResult {
+  path: string;
+  base_url: string;
+  added: string[];
+  models: number;
+  api_key_updated: boolean;
+  backup: string;
+}
+
 export interface ConfigImportResult {
   providers: number;
   models: number;
@@ -332,6 +360,13 @@ export const admin = {
     get: () =>
       api<{ data: import('./types').SettingsMap; version: string; master_key_set: boolean }>('/settings'),
     update: (body: Record<string, string>) => api<{ ok: boolean }>('/settings', { method: 'PATCH', body }),
+  },
+
+  opencode: {
+    status: () => api<{ data: OpenCodeStatus; error?: string }>('/opencode/status'),
+    /** Merges MyRouter routes (and optionally a new key) into opencode.json. */
+    sync: (body: { api_key?: string; base_url?: string }) =>
+      api<{ data: OpenCodeSyncResult }>('/opencode/sync', { method: 'POST', body }),
   },
 
   config: {

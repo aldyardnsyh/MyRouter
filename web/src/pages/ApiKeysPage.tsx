@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, KeyRound, Plus } from 'lucide-react';
+import { AlertTriangle, KeyRound, Laptop, Plus } from 'lucide-react';
 import { PageHeader, StatCard, Callout } from '../components/ui/Layout';
 import { Button } from '../components/ui/Button';
 import { Badge, StatusBadge } from '../components/ui/Badge';
@@ -39,6 +39,7 @@ export function ApiKeysPage() {
   const [assignPolicy, setAssignPolicy] = useState('');
   const [confirmRevoke, setConfirmRevoke] = useState<APIKey | null>(null);
   const [revoking, setRevoking] = useState(false);
+  const [syncingOpencode, setSyncingOpencode] = useState(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -100,6 +101,24 @@ export function ApiKeysPage() {
       await load(true);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Update failed');
+    }
+  }
+
+  // Uses the secret while it is still on screen: writes this key plus every
+  // enabled route into the OpenCode config so the new models appear after a
+  // restart, without hand editing opencode.json.
+  async function syncNewKeyToOpencode() {
+    if (!secret) return;
+    setSyncingOpencode(true);
+    try {
+      const res = await admin.opencode.sync({ api_key: secret });
+      toast.success(
+        `OpenCode diperbarui: key ditulis, ${res.data.added.length} model baru ditambahkan. Restart OpenCode.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Sync ke OpenCode gagal');
+    } finally {
+      setSyncingOpencode(false);
     }
   }
 
@@ -227,6 +246,17 @@ export function ApiKeysPage() {
             </Callout>
             <SecretReveal value={secret} hint="Send it as: Authorization: Bearer <key>" />
             <ConnectPanel baseUrl={overview?.base_url ?? `${window.location.origin}/v1`} apiKey={secret} compact />
+            <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+              <Button
+                variant="secondary"
+                size="compact"
+                loading={syncingOpencode}
+                onClick={() => void syncNewKeyToOpencode()}
+              >
+                <Laptop size={14} /> Write key + models to OpenCode
+              </Button>
+              <span className="text-[11.5px] text-muted">Updates the myrouter provider in opencode.json.</span>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col gap-3.5">

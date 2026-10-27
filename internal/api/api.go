@@ -64,6 +64,10 @@ type ServerConfig struct {
 	Version      string
 	AllowPrivate bool
 	DevMode      bool
+	// Addr and DataDir are surfaced by the diagnostics endpoints so the
+	// operator can tell which instance and database a dashboard belongs to.
+	Addr    string
+	DataDir string
 }
 
 // Deps are the shared services the API depends on.
@@ -234,6 +238,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/playground/stream", s.withAuth(s.handlePlaygroundStream))
 	mux.HandleFunc("GET /admin/settings", s.withAuth(s.handleGetSettings))
 	mux.HandleFunc("PATCH /admin/settings", s.withAuth(s.handleUpdateSettings))
+
+	// OpenCode integration: inspect and sync the client config that points at
+	// this gateway, so newly created routes and keys show up without hand
+	// editing opencode.json.
+	mux.HandleFunc("GET /admin/opencode/status", s.withAuth(s.handleOpencodeStatus))
+	mux.HandleFunc("POST /admin/opencode/sync", s.withAuth(s.handleOpencodeSync))
 	// Health. The detailed admin view (provider/degraded counters, trusted
 	// proxy count) is internal state and must not be readable without a
 	// session; unauthenticated liveness checks use the public /healthz route

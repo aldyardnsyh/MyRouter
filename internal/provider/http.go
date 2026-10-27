@@ -186,7 +186,9 @@ type statusError struct {
 }
 
 func (e *statusError) Error() string {
-	return fmt.Sprintf("upstream status %d: %s", e.Status, truncate(string(e.Body), 300))
+	// Route through the shared extractor so an HTML error page is summarised
+	// instead of dumped into logs and client-visible messages.
+	return fmt.Sprintf("upstream status %d: %s", e.Status, extractMessage(e.Body))
 }
 
 func truncate(s string, n int) string {
