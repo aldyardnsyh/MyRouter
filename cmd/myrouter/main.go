@@ -54,6 +54,10 @@ func main() {
 	shortcutFlag := flag.Bool("install-shortcut", false, "create a Desktop shortcut that starts MyRouter in tray mode")
 	autostartFlag := flag.Bool("autostart", false, "also launch MyRouter at login (implies -install-shortcut)")
 	installOnlyFlag := flag.Bool("install-only", false, "install the desktop shortcut and exit")
+	// Opt-in clean start: move the live database aside and boot as a fresh
+	// install. Off by default on purpose - waking up to a wiped gateway would
+	// be a catastrophic surprise, so this must always be an explicit request.
+	resetDataFlag := flag.Bool("reset-data", false, "back up and clear the local database, then start from first-run setup")
 	flag.Parse()
 
 	showTray := *trayFlag && !*noTrayFlag
@@ -104,6 +108,17 @@ func main() {
 		log.Error("cannot create data dir", logx.F("error", err.Error()))
 		os.Exit(1)
 	}
+	if *resetDataFlag || envBool("MYROUTER_RESET_DATA") {
+		moved, err := store.ResetData(cfg.DataDir)
+		if err != nil {
+			log.Error("reset-data failed", logx.F("error", err.Error()))
+			os.Exit(1)
+		}
+		log.Warn("reset-data: local database cleared, starting fresh", logx.F("backups", strings.Join(moved, ",")))
+		for _, m := range moved {
+			fmt.Println("backed up:", m)
+		}
+	}
 	// The desktop build is linked with -H windowsgui (no console), so mirror
 	// logs to a file the operator can inspect when the tray misbehaves. A
 	// console build launched by double-click also hides its console, so the
@@ -121,6 +136,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	// One-time browser cache eviction after an upgrade (see uicache.go).
+	initUICache(cfg.DataDir, version)
 
 	box, err := loadBox(cfg, db)
 	if err != nil {
@@ -399,10 +416,10 @@ func spaHandler(log *logx.Logger) http.Handler {
 				if strings.HasPrefix(clean, "/assets/") {
 					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 				} else {
-					w.Header().Set("Cache-Control", "no-cache")
+					serveShellHeaders(w)
 				}
 			} else {
-				w.Header().Set("Cache-Control", "no-cache")
+				serveShellHeaders(w)
 			}
 			fileServer.ServeHTTP(w, r)
 			return
@@ -415,9 +432,22 @@ func spaHandler(log *logx.Logger) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
+		serveShellHeaders(w)
 		_, _ = w.Write(index)
 	})
+}
+
+// serveShellHeaders marks the SPA shell as uncacheable and, on the first page
+// load after an upgrade, asks the browser to drop previously cached responses.
+// Hashed /assets/* files keep their immutable cache; only the shell changes.
+func serveShellHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	if uiCacheNeedsClear() {
+		// "cache" only: cookies and storage must survive so the admin session
+		// and the local history are not thrown away by an upgrade.
+		w.Header().Set("Clear-Site-Data", `"cache"`)
+	}
 }
 
 // securityHeaders applies conservative defaults to every response.

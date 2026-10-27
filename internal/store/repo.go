@@ -178,10 +178,36 @@ func (db *DB) SetProviderStatus(id, status, lastErr string, at int64) error {
 	return err
 }
 
-// DeleteProvider removes a provider and its dependants (FK cascade).
-func (db *DB) DeleteProvider(id string) error {
-	_, err := db.Exec(`DELETE FROM provider WHERE id=?`, id)
-	return err
+// DeleteProvider removes a provider, its dependants (FK cascade), and every
+// route that the deletion left without a single usable target.
+//
+// route_target cascades on model delete, but the route row does not: without
+// this cleanup a deleted provider left "ghost" routes behind that still showed
+// up with zero targets. Deleting is the honest outcome here - a route with no
+// target can never serve traffic and cannot be repaired without picking a new
+// model, so keeping it only hides broken state. Disabling a provider is the
+// reversible path and keeps its routes intact.
+func (db *DB) DeleteProvider(id string) (routesRemoved int64, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM provider WHERE id=?`, id); err != nil {
+		return 0, err
+	}
+	// Sweep any route that no longer has a target. This also repairs routes
+	// orphaned by earlier versions of the app.
+	res, err := tx.Exec(`DELETE FROM route WHERE id NOT IN (SELECT DISTINCT route_id FROM route_target)`)
+	if err != nil {
+		return 0, err
+	}
+	routesRemoved, _ = res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return routesRemoved, nil
 }
 
 // SaveCredential upserts the encrypted credential for a provider.
@@ -308,10 +334,17 @@ func repeat(s string, n int) string {
 // ---------------------------------------------------------------------------
 
 // ListRoutes returns routes with targets.
+//
+// Routes without a single target are skipped: they are leftovers from a
+// deleted provider (the old DELETE did not cascade) and cannot serve traffic.
+// They are intentionally hidden from every operational view instead of being
+// presented as "disabled", which would suggest they can be re-enabled.
 func (db *DB) ListRoutes() ([]model.Route, error) {
 	rows, err := db.Query(`SELECT r.id, r.alias, r.description, r.enabled, r.strategy, r.retry, r.timeout_ms,
 		r.policy_id, COALESCE(p.name,''), r.fallback_on, r.created_at
-		FROM route r LEFT JOIN policy p ON p.id = r.policy_id ORDER BY r.created_at ASC`)
+		FROM route r LEFT JOIN policy p ON p.id = r.policy_id
+		WHERE EXISTS (SELECT 1 FROM route_target t WHERE t.route_id = r.id)
+		ORDER BY r.created_at ASC`)
 	if err != nil {
 		return nil, err
 	}

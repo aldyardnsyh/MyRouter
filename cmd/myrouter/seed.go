@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -30,6 +31,16 @@ func settingBool(db *store.DB, key string, def bool) bool {
 }
 
 func parseInt(s string) (int, error) { return strconv.Atoi(strings.TrimSpace(s)) }
+
+// envBool reads a boolean environment switch ("1", "true", "yes", "on").
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // seedDefaults writes first-run settings and the built-in policy presets.
 // It is idempotent and never overwrites user choices.

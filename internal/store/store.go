@@ -45,6 +45,13 @@ func (db *DB) migrate() error {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	// Self-heal routes orphaned by older builds: DeleteProvider used to leave
+	// the route row behind after its targets cascaded away. Those rows can
+	// never serve traffic and used to surface as "routes hidden because their
+	// provider is disabled", which was misleading.
+	if _, err := db.Exec(`DELETE FROM route WHERE id NOT IN (SELECT DISTINCT route_id FROM route_target)`); err != nil {
+		return fmt.Errorf("prune orphan routes: %w", err)
+	}
 	return nil
 }
 

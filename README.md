@@ -39,6 +39,11 @@ Open <http://localhost:20128>. On first start the server prints a one-time setup
 - Install a Desktop shortcut: `.\dist\MyRouter.exe -install-only`
 - Autostart at login: `.\dist\MyRouter.exe -install-shortcut -autostart`
 - Desktop logs: `data/myrouter.log`
+- Start from scratch: `.\dist\MyRouter.exe -reset-data` (or `MYROUTER_RESET_DATA=1`)
+  moves the live database, its WAL files, and `master.key` into
+  `data/backups/*.reset.bak` first, then boots into first-run setup. Nothing is
+  deleted, and the reset is never automatic — an existing gateway is far too
+  valuable to wipe without an explicit request.
 
 > Windows 11 puts newly registered tray icons in the notification-area overflow
 > (the `^` chevron) by default. Drag the MyRouter icon to the taskbar once and
@@ -54,6 +59,7 @@ Open <http://localhost:20128>. On first start the server prints a one-time setup
 | `MYROUTER_MASTER_KEY_SALT` | — | Extra salt for passphrase-derived keys |
 | `MYROUTER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `MYROUTER_LOG_RETENTION_DAYS` | `30` | Request-log retention |
+| `MYROUTER_RESET_DATA` | — | `1`/`true` = back up and clear the local database at startup |
 
 ## Connect a client
 

@@ -318,11 +318,12 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 }
 
 func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request, _ *authSession) {
-	if err := s.db.DeleteProvider(s.pathID(r)); err != nil {
+	routes, err := s.db.DeleteProvider(s.pathID(r))
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "delete_failed", err.Error())
 		return
 	}
-	writeOK(w, map[string]bool{"ok": true})
+	writeOK(w, map[string]any{"ok": true, "routes_removed": routes})
 }
 
 // handleTestProvider validates credentials against the upstream.

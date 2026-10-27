@@ -10,7 +10,7 @@ import { CodeBlock } from '../components/ui/CopyField';
 import { useToast } from '../components/ui/Toast';
 import { admin, ApiError } from '../lib/api';
 import type { Model, Policy, Provider, Route } from '../lib/types';
-import { classNames, fallbacksOf, formatLatency, isValidAlias, primaryOf, routeHasUsableTarget, routeIsOrphaned } from '../lib/format';
+import { classNames, fallbacksOf, formatLatency, isValidAlias, primaryOf, routeHasUsableTarget, routeIsInactive, routeIsOrphaned } from '../lib/format';
 
 const fallbackConditions = [
   { key: 'rate_limit', label: 'Rate limit (429)' },
@@ -396,10 +396,12 @@ export function RoutesPage() {
     });
   }
 
-  // A route is only shown when at least one target can actually serve: the API
-  // marks a target unavailable when its provider is disabled, so disabling a
-  // provider takes its routes out of this page without deleting them.
-  const hiddenRoutes = routes.filter(routeIsOrphaned);
+  // Two different situations, deliberately not conflated:
+  //  - orphaned: no targets left at all (a deleted provider). The server now
+  //    deletes these routes, so they are never listed here.
+  //  - inactive: targets exist but every provider behind them is disabled.
+  //    This is reversible, so the route stays visible with an explanation.
+  const inactiveRoutes = routes.filter(routeIsInactive);
   const visibleRoutes = routes.filter((r) => !routeIsOrphaned(r));
   const enabledCount = visibleRoutes.filter((r) => r.enabled && routeHasUsableTarget(r)).length;
   const totalFallbacks = visibleRoutes.reduce((acc, r) => acc + fallbacksOf(r).length, 0);
@@ -578,15 +580,15 @@ export function RoutesPage() {
       />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Active Routes" value={String(enabledCount)} hint={`${routes.length} total${hiddenRoutes.length ? `, ${hiddenRoutes.length} inactive` : ''}`} tone="success" icon={<RouteIcon size={15} />} />
+        <StatCard label="Active Routes" value={String(enabledCount)} hint={`${routes.length} total${inactiveRoutes.length ? `, ${inactiveRoutes.length} inactive` : ''}`} tone="success" icon={<RouteIcon size={15} />} />
         <StatCard label="Fallback Targets" value={String(totalFallbacks)} hint="across visible routes" />
         <StatCard label="Strategies" value="Priority" hint="fallback on 429/5xx/timeout" />
         <StatCard label="Default Timeout" value={formatLatency(30000)} hint="per route, configurable" />
       </div>
 
-      {hiddenRoutes.length > 0 && (
+      {inactiveRoutes.length > 0 && (
         <Callout tone="warning">
-          {hiddenRoutes.length} route disembunyikan karena semua provider targetnya nonaktif. Aktifkan provider di halaman Providers untuk memunculkannya lagi.
+          {inactiveRoutes.length} route tidak bisa melayani request karena provider targetnya sedang nonaktif. Aktifkan provider di halaman Providers untuk mengaktifkannya lagi.
         </Callout>
       )}
 

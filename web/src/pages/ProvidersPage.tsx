@@ -541,7 +541,7 @@ export function ProvidersPage() {
         onClose={() => setConfirmDelete(null)}
         onConfirm={() => void remove()}
         title="Delete provider"
-        message={`Delete “${confirmDelete?.name}”? Its models, credentials, and route targets will be removed. This cannot be undone.`}
+        message={`Delete “${confirmDelete?.name}”? Its models, credentials, and route targets will be removed. Routes that lose every target are deleted too. Disable the provider instead if you only want to pause it. This cannot be undone.`}
         confirmLabel="Delete provider"
         loading={deleting}
       />

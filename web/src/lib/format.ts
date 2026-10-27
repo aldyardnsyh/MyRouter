@@ -183,12 +183,15 @@ export const fallbacksOf = (r: Route) => r.targets.filter((t) => t.role === 'fal
 // both "model is available" and "provider is enabled".
 export const routeHasUsableTarget = (r: Route): boolean => r.targets.some((t) => t.available);
 
-// A route whose every target points at a disabled provider (or an unavailable
-// model) cannot serve traffic. The same is true once a deleted provider has
-// cascaded its targets away: zero targets is an orphan, not a usable route.
-// It stays in the database but should not show up as a working route in
-// operational views.
-export const routeIsOrphaned = (r: Route): boolean => !routeHasUsableTarget(r);
+// A route with zero targets cannot serve anything. The server deletes such
+// routes when a provider is removed, so this only appears for stale data from
+// an older build; keep the guard so the UI never renders an unusable row.
+export const routeIsOrphaned = (r: Route): boolean => r.targets.length === 0;
+
+// True when the route still has targets but every provider behind them is
+// disabled. This is the reversible case: enabling the provider brings the
+// route back, so the UI explains it instead of hiding the row.
+export const routeIsInactive = (r: Route): boolean => r.targets.length > 0 && !routeHasUsableTarget(r);
 
 export const keyStatus = (k: APIKey): BadgeSpec => {
   if (!k.enabled) return { label: 'Disabled', tone: 'neutral' };
