@@ -96,7 +96,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	auth, err := g.Authenticate(r)
 	if err != nil {
-		g.logActivity(requestID, started, r, nil, nil, nil, "blocked", http.StatusUnauthorized, 0, 0, 0, "", err.Error(), nil)
+		g.logActivity(requestID, started, r, nil, nil, nil, nil, "blocked", http.StatusUnauthorized, 0, 0, 0, "", "", err.Error(), nil)
 		WriteOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", "invalid_api_key", err.Error(), 0)
 		return
 	}
@@ -110,13 +110,13 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	route, err := g.db.RouteByAlias(input.Model)
 	if err != nil {
-		g.logActivity(requestID, started, r, auth, nil, nil, "blocked", http.StatusNotFound, 0, 0, 0, "", "unknown route alias: "+input.Model, nil)
+		g.logActivity(requestID, started, r, auth, nil, nil, nil, "blocked", http.StatusNotFound, 0, 0, 0, "", "", "unknown route alias: "+input.Model, nil)
 		WriteOpenAIError(w, http.StatusNotFound, "invalid_request_error", "model_not_found",
 			fmt.Sprintf("route alias %q not found", input.Model), 0)
 		return
 	}
 	if allowed := store.SplitCSV(auth.Key.AllowedRoutes); len(allowed) > 0 && !containsFold(allowed, route.Alias) {
-		g.logActivity(requestID, started, r, auth, route, nil, "blocked", http.StatusForbidden, 0, 0, 0, "api_key", "route not permitted for key", nil)
+		g.logActivity(requestID, started, r, auth, route, nil, nil, "blocked", http.StatusForbidden, 0, 0, 0, "api_key", "", "route not permitted for key", nil)
 		WriteOpenAIError(w, http.StatusForbidden, "invalid_request_error", "route_forbidden",
 			fmt.Sprintf("route %q is not allowed for this key", route.Alias), 0)
 		return
@@ -128,7 +128,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	fp := guard.Fingerprint(auth.Key.ID, ip, ua, r.Header.Get("X-Device-Id"))
 	deviceID, _ := g.db.UpsertDevice(auth.Key.ID, fp, ip, ua)
 	if blocked, _ := g.db.IsDeviceBlocked(auth.Key.ID, fp); blocked {
-		g.logActivity(requestID, started, r, auth, route, nil, "blocked", http.StatusForbidden, 0, 0, 0, "device", "device is blocked", nil)
+		g.logActivity(requestID, started, r, auth, route, nil, nil, "blocked", http.StatusForbidden, 0, 0, 0, "device", "", "device is blocked", nil)
 		WriteOpenAIError(w, http.StatusForbidden, "invalid_request_error", "device_blocked", "this device is blocked by Guard", 0)
 		return
 	}
@@ -171,8 +171,8 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !decision.Allowed {
-		g.logActivity(requestID, started, r, auth, route, primaryProv, "blocked", decision.HTTPStatus, 0, 0, 0,
-			guardScope(decision.Scope, decision.PolicyName), decision.Reason, []model.TraceStep{{
+		g.logActivity(requestID, started, r, auth, route, primaryProv, nil, "blocked", decision.HTTPStatus, 0, 0, 0,
+			guardScope(decision.Scope, decision.PolicyName), "", decision.Reason, []model.TraceStep{{
 				Attempt: 0, Target: input.Model, Outcome: "guard_blocked", Category: decision.Scope,
 				StatusCode: decision.HTTPStatus, Message: decision.Reason,
 			}})
@@ -207,7 +207,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	outcome, execErr := g.execute(r.Context(), prep)
 	if execErr != nil {
 		g.live.finish(liveID, "error")
-		g.logActivity(requestID, started, r, auth, route, primaryProv, "blocked", http.StatusForbidden, 0, 0, 0, "", execErr.Error(), nil)
+		g.logActivity(requestID, started, r, auth, route, primaryProv, nil, "blocked", http.StatusForbidden, 0, 0, 0, "", "", execErr.Error(), nil)
 		// Do not echo internal error text (may contain upstream details).
 		WriteOpenAIError(w, http.StatusForbidden, "invalid_request_error", "route_unavailable", "route is not available", 0)
 		return
@@ -218,8 +218,8 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	if outcome.Err != nil && !outcome.StreamStarted {
 		g.live.finish(liveID, "error")
 		status := statusFor(outcome.Err)
-		g.logActivity(requestID, started, r, auth, route, outcome.Provider, "error", status, latency.Milliseconds(),
-			outcome.InTokens, outcome.OutTokens, "", outcome.Err.Message, prep.traceWith(outcome.Trace))
+		g.logActivity(requestID, started, r, auth, route, outcome.Provider, outcome.Model, "error", status, latency.Milliseconds(),
+			outcome.InTokens, outcome.OutTokens, "", "", outcome.Err.Message, prep.traceWith(outcome.Trace))
 		WriteOpenAIError(w, status, "upstream_error", string(outcome.Err.Category), outcome.Err.Message, 0)
 		return
 	}
@@ -244,8 +244,8 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		status = "ok"
 		fallbackFrom = input.Model
 	}
-	g.logActivity(requestID, started, r, auth, route, outcome.Provider, status, http.StatusOK,
-		latency.Milliseconds(), resp.Usage.InputTokens, resp.Usage.OutputTokens, fallbackFrom, "", prep.traceWith(outcome.Trace))
+	g.logActivity(requestID, started, r, auth, route, outcome.Provider, outcome.Model, status, http.StatusOK,
+		latency.Milliseconds(), resp.Usage.InputTokens, resp.Usage.OutputTokens, "", fallbackFrom, "", prep.traceWith(outcome.Trace))
 	g.recordUsage(route, outcome.Provider, auth.Key, status, resp.Usage, outcome.Fallback, outcome.Model)
 	g.live.finish(liveID, "ok")
 	go g.captureSkills(prep, resp.Content)
@@ -425,11 +425,19 @@ func (g *Gateway) finishStream(prep *PreparedRequest, outcome *Outcome, requestI
 		status, inTok, outTok, cost)
 }
 
+// logActivity records one request_log row. guardReason names the Guard scope
+// that blocked the call, fallbackFrom names the originally requested model when
+// a later target answered, and mdl is the model that actually served (or last
+// failed) the request. They are separate columns and must not be conflated, or
+// the Activity view shows a route alias in the Guard column, loses the fallback
+// badge, and cannot attribute usage to a model.
 func (g *Gateway) logActivity(requestID string, started time.Time, r *http.Request, auth *AuthResult, route *model.Route, prov *model.Provider,
-	status string, httpStatus int, latency int64, inTok, outTok int, guardReason, errMsg string, trace []model.TraceStep) {
+	mdl *model.Model, status string, httpStatus int, latency int64, inTok, outTok int,
+	guardReason, fallbackFrom, errMsg string, trace []model.TraceStep) {
 	entry := &model.RequestLog{
 		RequestID: requestID, TS: started.Unix(), Status: status, HTTPStatus: httpStatus,
-		LatencyMS: latency, InTokens: inTok, OutTokens: outTok, GuardReason: guardReason, ErrorCode: errMsg, Trace: trace,
+		LatencyMS: latency, InTokens: inTok, OutTokens: outTok, GuardReason: guardReason,
+		FallbackFrom: fallbackFrom, ErrorCode: errMsg, Trace: trace,
 	}
 	if entry.Trace == nil {
 		entry.Trace = []model.TraceStep{}
@@ -445,12 +453,22 @@ func (g *Gateway) logActivity(requestID string, started time.Time, r *http.Reque
 	if prov != nil {
 		entry.ProviderID = prov.ID
 	}
+	if mdl != nil {
+		entry.ModelID = mdl.ID
+	}
 	_ = g.db.InsertRequestLog(entry)
-	if route != nil {
+	// Success rows are aggregated by recordUsage (non-streaming) and
+	// finishStream (streaming), which also know the cost. Everything else —
+	// blocked, error, unknown route — is aggregated here so the Usage tab still
+	// counts failures. Writing the aggregate in both places used to count every
+	// successful request twice.
+	if route != nil && status != "ok" {
 		_ = g.db.AddUsage(time.Now().Format("2006-01-02"), route.ID, entry.ProviderID, entry.APIKeyID, status, inTok, outTok, false, nil)
 	}
 }
 
+// recordUsage writes the daily rollups (per route/provider/key and per model)
+// with the estimated cost.
 func (g *Gateway) recordUsage(route *model.Route, prov *model.Provider, key *model.APIKey, status string, usage provider.Usage, fallback bool, mdl *model.Model) {
 	date := time.Now().Format("2006-01-02")
 	cost := g.costOf(mdl, usage.InputTokens, usage.OutputTokens)

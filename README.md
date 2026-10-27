@@ -2,7 +2,117 @@
 
 **One endpoint. Every model.**
 
-Self-hosted AI routing gateway: a single [OI]-compatible endpoint for many upstream providers, with automatic fallback, per-key access limits, and a dashboard. Ships as one binary with the web UI embedded.
+[![Release](https://img.shields.io/github/v/release/aldyardnsyh/MyRouter?sort=semver&label=release)](https://github.com/aldyardnsyh/MyRouter/releases/latest)
+[![Build](https://img.shields.io/badge/build-go%20build%20.%2F...-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Tests](https://img.shields.io/badge/tests-go%20test%20.%2F...-success)](https://github.com/aldyardnsyh/MyRouter)
+[![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind-3.4-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)](https://sqlite.org)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#desktop-app-windows)
+[![License](https://img.shields.io/badge/license-see%20LICENSE.md-lightgrey)](LICENSE.md)
+
+Self-hosted AI routing gateway: a single OpenAI-compatible endpoint for many upstream providers, with automatic fallback, per-key access limits, and a dashboard. Ships as one binary with the web UI embedded.
+
+**[Download the latest release](https://github.com/aldyardnsyh/MyRouter/releases/latest)** &middot; Windows users can run `MyRouter.exe` directly (tray app, no installer).
+
+![MyRouter dashboard](assets/screenshots/dashboard.png)
+
+## Features
+
+| | |
+| --- | --- |
+| **One endpoint, many providers** | OpenAI, Anthropic, Gemini, DeepSeek and any OpenAI-compatible gateway behind a single `/v1` base URL. |
+| **Routes with fallback** | Virtual model aliases with an ordered primary → fallback chain and per-category triggers (429, timeout, 5xx, network, billing). |
+| **Skills** | Server-side context injected automatically: instructions, memory, retrieved knowledge, past exchanges, vision bridging. |
+| **Guard** | RPM/TPM, daily and monthly token caps, concurrency, IP and device limits, auto-blocking, per-key and per-route policies. |
+| **Observability** | Live routing map, hourly/daily charts, per-request trace with every attempt, token and cost accounting from official catalog prices. |
+| **Single binary** | Go server with the React console embedded; SQLite storage, no external services. |
+
+## Screenshots
+
+Every screen is captured from a real instance (`tests/seed_demo.py` builds the demo state through the public admin API, so nothing is mocked in the UI).
+
+### Dashboard
+
+Live routing, provider health, throughput chart with 24h/3d/7d/30d ranges, and recent activity.
+
+| Requests (24h) | Tokens | Latency |
+| --- | --- | --- |
+| ![Dashboard requests](assets/screenshots/dashboard.png) | ![Dashboard tokens](assets/screenshots/dashboard-tokens.png) | ![Dashboard latency](assets/screenshots/dashboard-latency.png) |
+
+| 3 days | 7 days | 30 days |
+| --- | --- | --- |
+| ![3 day range](assets/screenshots/dashboard-range-3d.png) | ![7 day range](assets/screenshots/dashboard-range-7d.png) | ![30 day range](assets/screenshots/dashboard-range-30d.png) |
+
+Mobile layout: [dashboard-mobile.png](assets/screenshots/dashboard-mobile.png) &middot; Sign-in: [login.png](assets/screenshots/login.png)
+
+### Providers
+
+Upstream endpoints, credentials, health, and the per-provider tabs (Overview, Models, Guard Policy).
+
+| Providers | Detail | Models | Guard Policy |
+| --- | --- | --- | --- |
+| ![Providers](assets/screenshots/providers.png) | ![Provider detail](assets/screenshots/provider-detail.png) | ![Provider models](assets/screenshots/provider-detail-models.png) | ![Provider guard policy](assets/screenshots/provider-detail-guard-policy.png) |
+
+### Models and Routes
+
+Discovered models with context windows, official prices and capabilities; routes with primary and fallback chains.
+
+| Models | Routes |
+| --- | --- |
+| ![Models](assets/screenshots/models.png) | ![Routes](assets/screenshots/routes.png) |
+
+### Skills
+
+Built-in and custom skills, bindings, and the knowledge drawer for a skill's stored items.
+
+| Skills | Knowledge items |
+| --- | --- |
+| ![Skills](assets/screenshots/skills.png) | ![Skill knowledge](assets/screenshots/skills-knowledge.png) |
+
+### API Keys and Guard
+
+Client keys with per-key route allow-lists and policies; Guard covers Policies, IP Rules, Devices and Blocked.
+
+| API Keys | Policies | IP Rules |
+| --- | --- | --- |
+| ![API keys](assets/screenshots/api-keys.png) | ![Guard policies](assets/screenshots/guard-policies.png) | ![Guard IP rules](assets/screenshots/guard-ip-rules.png) |
+
+| Guard overview | Devices | Blocked |
+| --- | --- | --- |
+| ![Guard](assets/screenshots/guard.png) | ![Guard devices](assets/screenshots/guard-devices.png) | ![Guard blocked](assets/screenshots/guard-blocked.png) |
+
+### Activity and Test Lab
+
+Request log with filters and per-request trace, usage rollups, and the playground for sending real prompts through a route.
+
+| Activity | Usage | Request detail |
+| --- | --- | --- |
+| ![Activity](assets/screenshots/activity.png) | ![Usage](assets/screenshots/activity-usage.png) | ![Request detail](assets/screenshots/activity-detail.png) |
+
+![Test Lab](assets/screenshots/playground.png)
+
+### Settings
+
+| General | API | Security |
+| --- | --- | --- |
+| ![Settings](assets/screenshots/settings.png) | ![Settings API](assets/screenshots/settings-api.png) | ![Settings security](assets/screenshots/settings-security.png) |
+
+| Routing | Guard defaults | Storage | System |
+| --- | --- | --- | --- |
+| ![Settings routing](assets/screenshots/settings-routing.png) | ![Settings guard](assets/screenshots/settings-guard.png) | ![Settings storage](assets/screenshots/settings-storage.png) | ![Settings system](assets/screenshots/settings-system.png) |
+
+Screenshots are reproducible:
+
+```bash
+python tests/demo_upstream.py --port 20401          # 3-protocol demo upstream
+MYROUTER_DATA=./data-demo ./myrouter -addr :20299 -no-tray
+python tests/seed_demo.py --base http://127.0.0.1:20299
+python tests/capture_screenshots.py --base http://127.0.0.1:20299
+```
+
 
 ## Requirements
 
@@ -68,7 +178,7 @@ Two different credentials exist:
 1. **Provider key** (upstream, e.g. your vendor API key) — Providers → Add Provider. The key is encrypted at rest and never shown again. Saving automatically tests the connection and imports the provider's models (context windows and official prices are filled in when the model is in the models.dev catalog), so Routes can be created right away. **Test Connection** and **Refresh models** stay available for manual re-checks.
 2. **Client key** (`mr-sk-…`, issued by MyRouter) — Dashboard → **Generate API key**, or API Keys → Create Key. It is shown once.
 
-Point any [OI]-compatible SDK at the gateway base URL (`http://localhost:20128/v1` by default). The dashboard shows ready-to-copy cURL, JavaScript, and Python snippets with the generated key.
+Point any OpenAI-compatible SDK at the gateway base URL (`http://localhost:20128/v1` by default). The dashboard shows ready-to-copy cURL, JavaScript, and Python snippets with the generated key.
 
 For a public deployment set **Settings → API → Base URL** to your public URL, e.g. `https://router.example.com/v1`.
 
@@ -145,6 +255,19 @@ python tests/mock_upstream.py --port 20400 &
 go build -o myrouter ./cmd/myrouter
 MYROUTER_ENV=development MYROUTER_DATA=./data-e2e ./myrouter -addr :20299 &
 python tests/e2e.py --base-url http://127.0.0.1:20299 --mock-url http://127.0.0.1:20400/v1
+```
+
+Demo and documentation screenshots use a separate, richer harness. `demo_upstream.py`
+speaks the OpenAI, Anthropic and Gemini wire formats at once with real model ids,
+`seed_demo.py` builds the demo state through the admin API and the gateway (so
+fallbacks, blocked rows and cost estimates are real), and `capture_screenshots.py`
+writes the images referenced above:
+
+```bash
+python tests/demo_upstream.py --port 20401 &
+MYROUTER_DATA=./data-demo ./myrouter -addr :20299 -no-tray &
+python tests/seed_demo.py --base http://127.0.0.1:20299
+python tests/capture_screenshots.py --base http://127.0.0.1:20299
 ```
 
 Before committing, scan for accidental credentials:
