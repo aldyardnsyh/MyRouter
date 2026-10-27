@@ -246,6 +246,16 @@ func (g *Gateway) PlaygroundStream(ctx context.Context, req PlaygroundRequest, e
 			if !ok {
 				res.Content = b.String()
 				out.Latency = time.Since(prep.Started)
+				// Defensive fallback: an upstream that closes without any text
+				// (or ignores streaming entirely) should not produce an empty
+				// "ok" test result. Retry once without streaming.
+				if strings.TrimSpace(res.Content) == "" && res.OutTokens == 0 {
+					retryReq := req
+					retryReq.Stream = false
+					if alt, err := g.Playground(ctx, retryReq); err == nil && alt != nil && alt.Status == "ok" {
+						return emit(PlaygroundEvent{Type: "done", Result: alt})
+					}
+				}
 				return emit(PlaygroundEvent{Type: "done", Result: g.finishPlayground(prep, out, res)})
 			}
 			if ev.Err != nil {

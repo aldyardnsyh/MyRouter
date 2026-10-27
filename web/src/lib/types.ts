@@ -23,6 +23,22 @@ export interface Provider {
   credential_hint?: string;
 }
 
+// Result of the connection probe run automatically when a provider is created
+// or updated. `status` mirrors the provider status vocabulary.
+export interface ProviderConnection {
+  status: Status;
+  message: string;
+  latency_ms: number;
+}
+
+// POST /admin/providers and PATCH /admin/providers/{id} now save, test, and
+// import models in one request.
+export interface ProviderSaveResult {
+  data: Provider;
+  connection: ProviderConnection;
+  models: number;
+}
+
 export interface Model {
   id: string;
   provider_id: string;
@@ -187,6 +203,25 @@ export interface UsageRow {
   est_cost: number | null;
 }
 
+// GET /admin/usage/models?days=N: per-provider-model usage with the official
+// catalog price used for the estimate. Prices and cost are null when the model
+// is missing from the catalog.
+export interface UsageModelRow {
+  provider_id: string;
+  provider_name: string;
+  provider_type: string;
+  model_id: string;
+  model_name: string;
+  requests: number;
+  ok: number;
+  failed: number;
+  in_tokens: number;
+  out_tokens: number;
+  est_cost: number | null;
+  price_in: number | null;
+  price_out: number | null;
+}
+
 export interface Metrics {
   requests: number;
   ok: number;
@@ -338,4 +373,78 @@ export interface PlaygroundCall {
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
   max_tokens?: number;
   temperature?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+export type SkillType = 'prompt' | 'memory' | 'retrieval' | 'chat' | 'vision';
+
+// Which routes a skill applies to. `global` applies it to every model alias;
+// `routes` holds route aliases for narrower bindings.
+export interface SkillBindings {
+  global: boolean;
+  routes: string[];
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  type: SkillType;
+  enabled: boolean;
+  // Per-type options (prompt, sync_paths, top_k, ...). The API returns this as
+  // a JSON object, not a string.
+  config: Record<string, unknown>;
+  item_count: number;
+  created_at: number;
+  bindings: SkillBindings;
+  last_sync_at: number;
+  last_sync_error: string;
+  last_sync_items: number;
+}
+
+export interface SkillItem {
+  id: string;
+  skill_id: string;
+  kind: string;
+  source: string;
+  title: string;
+  content: string;
+  created_at: number;
+}
+
+export interface SkillPreview {
+  context: string;
+  applied: { skill: string; kind: string; detail: string }[];
+}
+
+export interface SkillSyncResult {
+  files: number;
+  items: number;
+  skipped: number;
+  error: string;
+}
+
+// POST /admin/skills/import/preview: a parsed SKILL.md fetched from skills.sh
+// (or GitHub). `truncated` means the stored content was capped by the backend.
+export interface SkillImportPreview {
+  name: string;
+  description: string;
+  content: string;
+  source_url: string;
+  owner: string;
+  repo: string;
+  path: string;
+  truncated: boolean;
+}
+
+// POST /admin/skills/import. Name and description default to the parsed
+// SKILL.md values; bind_global applies the new skill to every model.
+export interface SkillImportRequest {
+  url: string;
+  name?: string;
+  description?: string;
+  bind_global?: boolean;
 }

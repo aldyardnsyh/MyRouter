@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/myrouter/myrouter/internal/model"
 )
@@ -404,13 +405,19 @@ func (db *DB) SaveRoute(r *model.Route) error {
 	if r.CreatedAt == 0 {
 		r.CreatedAt = now
 	}
+	// Defensive: an empty policy reference must be NULL. Passing a pointer to ""
+	// used to violate the policy foreign key and surface as a raw save error.
+	policyID := r.PolicyID
+	if policyID != nil && strings.TrimSpace(*policyID) == "" {
+		policyID = nil
+	}
 	if r.ID == "" {
 		r.ID = NewID("rt")
 		_, err = tx.Exec(`INSERT INTO route (id, alias, description, enabled, strategy, retry, timeout_ms, policy_id, fallback_on, created_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?)`, r.ID, r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, r.PolicyID, r.FallbackOn, r.CreatedAt)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`, r.ID, r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, policyID, r.FallbackOn, r.CreatedAt)
 	} else {
 		_, err = tx.Exec(`UPDATE route SET alias=?, description=?, enabled=?, strategy=?, retry=?, timeout_ms=?, policy_id=?, fallback_on=? WHERE id=?`,
-			r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, r.PolicyID, r.FallbackOn, r.ID)
+			r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, policyID, r.FallbackOn, r.ID)
 	}
 	if err != nil {
 		return err
@@ -444,6 +451,51 @@ func (db *DB) SaveRoute(r *model.Route) error {
 func (db *DB) DeleteRoute(id string) error {
 	_, err := db.Exec(`DELETE FROM route WHERE id=?`, id)
 	return err
+}
+
+// placeholders returns "?,?,…" for an IN list. Callers always pass a non-empty
+// slice, so the generated SQL is never `IN ()`.
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return "?" + repeat(",?", n-1)
+}
+
+// SetRoutesEnabled flips the enabled flag for several routes at once and
+// reports how many rows changed. It backs the Routes page bulk toolbar so an
+// operator does not have to toggle rows one by one.
+func (db *DB) SetRoutesEnabled(ids []string, enabled bool) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, boolToInt(enabled))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	res, err := db.Exec(`UPDATE route SET enabled=? WHERE id IN (`+placeholders(len(ids))+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteRoutes removes several routes in one statement (route_target rows go
+// away through the foreign-key cascade).
+func (db *DB) DeleteRoutes(ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	res, err := db.Exec(`DELETE FROM route WHERE id IN (`+placeholders(len(ids))+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ---------------------------------------------------------------------------

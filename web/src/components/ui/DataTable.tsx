@@ -8,7 +8,9 @@ import { EmptyState, ErrorState } from './Layout';
 
 export interface Column<T> {
   key: string;
-  header: string;
+  // ReactNode so callers can put a select-all checkbox in the header without
+  // abandoning the shared table.
+  header: ReactNode;
   align?: 'left' | 'right' | 'center';
   width?: string;
   className?: string;
@@ -26,6 +28,9 @@ export interface DataTableProps<T> {
   empty?: ReactNode;
   footer?: ReactNode;
   actions?: (row: T) => ReactNode;
+  // Per-row styling hook. Used to mark inactive rows (disabled providers) so
+  // the state is readable at a glance instead of only inside the row menu.
+  rowClassName?: (row: T) => string | false | null | undefined;
 }
 
 const alignClass = { left: 'text-left', right: 'text-right', center: 'text-center' };
@@ -42,6 +47,7 @@ export function DataTable<T>({
   empty,
   footer,
   actions,
+  rowClassName,
 }: DataTableProps<T>) {
   const totalCols = columns.length + (actions ? 1 : 0);
   // Never trust the caller: a null list from the API used to crash .map here.
@@ -106,7 +112,7 @@ export function DataTable<T>({
                 <tr
                   key={rowKey(row)}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}
-                  className={classNames('group transition-colors duration-[120ms]', onRowClick && 'cursor-pointer', 'hover:bg-surface-2')}
+                  className={classNames('group transition-colors duration-[120ms]', onRowClick && 'cursor-pointer', 'hover:bg-surface-2', rowClassName?.(row))}
                 >
                   {columns.map((c) => (
                     <td

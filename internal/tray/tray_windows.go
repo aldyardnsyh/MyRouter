@@ -138,6 +138,12 @@ var (
 	procGlobalAlloc         = kernel32.NewProc("GlobalAlloc")
 	procGlobalLock          = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock        = kernel32.NewProc("GlobalUnlock")
+	procGetConsoleWindow    = kernel32.NewProc("GetConsoleWindow")
+	procConsoleProcessList  = kernel32.NewProc("GetConsoleProcessList")
+	procProcessIdToSession  = kernel32.NewProc("ProcessIdToSessionId")
+	procFreeConsole         = kernel32.NewProc("FreeConsole")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procMessageBoxW         = user32.NewProc("MessageBoxW")
 
 	wndProcCallback   uintptr
 	hwnd              windows.Handle
@@ -215,6 +221,66 @@ func Stop() {
 		return
 	}
 	procPostMessageW.Call(uintptr(hwnd), wmClose, 0, 0)
+}
+
+// consoleWindow returns the console window attached to this process, or 0.
+func consoleWindow() windows.Handle {
+	h, _, _ := procGetConsoleWindow.Call()
+	return windows.Handle(h)
+}
+
+// HasConsole reports whether the process currently has a console window. GUI
+// builds (-H windowsgui) return false.
+func HasConsole() bool { return consoleWindow() != 0 }
+
+// Interactive reports whether the process runs in an interactive Windows
+// session. Services and session-0 containers return false, where a tray icon
+// cannot exist and must not be treated as a fatal startup error.
+func Interactive() bool {
+	var session uint32
+	r, _, _ := procProcessIdToSession.Call(uintptr(windows.GetCurrentProcessId()), uintptr(unsafe.Pointer(&session)))
+	return r != 0 && session != 0
+}
+
+// ownsConsole reports whether the console was created for this process, which
+// is what happens when Explorer launches a console build by double-click. A
+// console shared with an already running terminal has more than one process
+// attached and must stay visible.
+func ownsConsole() bool {
+	if consoleWindow() == 0 {
+		return false
+	}
+	var pids [2]uint32
+	n, _, _ := procConsoleProcessList.Call(uintptr(unsafe.Pointer(&pids[0])), 2)
+	return n == 1
+}
+
+// HideOwnConsole hides the console window when it belongs to this process only,
+// so a double-clicked console build behaves like a tray app instead of leaving
+// a terminal window open for the lifetime of the server.
+//
+// Windows Terminal ignores ShowWindow on a pseudo console, so after hiding the
+// window we also detach the console. A console that belongs to this process
+// closes with it; a console shared with a terminal is never touched.
+func HideOwnConsole() bool {
+	if !ownsConsole() {
+		return false
+	}
+	const swHide = 0
+	procShowWindow.Call(uintptr(consoleWindow()), swHide)
+	// Detach last: it closes the window/tab on terminals that ignore SW_HIDE.
+	// Log output is already mirrored to data/myrouter.log in tray mode.
+	procFreeConsole.Call()
+	return true
+}
+
+// ShowError displays a native modal error dialog. It is used when the tray
+// cannot be created in a build that has no console to report the failure in.
+func ShowError(title, text string) {
+	const mbOK, mbIconError = 0x00000000, 0x00000010
+	t, _ := windows.UTF16PtrFromString(title)
+	m, _ := windows.UTF16PtrFromString(text)
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(m)), uintptr(unsafe.Pointer(t)), mbOK|mbIconError)
 }
 
 func addIcon() error {

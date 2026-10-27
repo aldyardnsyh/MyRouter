@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -26,9 +27,12 @@ import (
 	"github.com/myrouter/myrouter/internal/gateway"
 	"github.com/myrouter/myrouter/internal/guard"
 	"github.com/myrouter/myrouter/internal/logx"
+	"github.com/myrouter/myrouter/internal/modelmeta"
+	"github.com/myrouter/myrouter/internal/modelspec"
 	"github.com/myrouter/myrouter/internal/monitor"
 	"github.com/myrouter/myrouter/internal/provider"
 	"github.com/myrouter/myrouter/internal/secret"
+	"github.com/myrouter/myrouter/internal/skills"
 	"github.com/myrouter/myrouter/internal/store"
 	"github.com/myrouter/myrouter/internal/tray"
 	"github.com/myrouter/myrouter/web"
@@ -40,12 +44,19 @@ var version = "0.1.0"
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	addrFlag := flag.String("addr", "", "listen address (default :20128)")
-	trayFlag := flag.Bool("tray", false, "run with a Windows system-tray icon")
+	// The tray is on by default on Windows desktop builds so a double-clicked
+	// .exe never becomes a background process with no way to quit. Use
+	// -no-tray (or -tray=false) for servers, services and containers.
+	defaultTray := runtime.GOOS == "windows"
+	trayFlag := flag.Bool("tray", defaultTray, "show a system-tray icon (default: true on Windows)")
+	noTrayFlag := flag.Bool("no-tray", false, "disable the system-tray icon (headless/server mode)")
 	openFlag := flag.Bool("open", false, "open the dashboard in the browser after start")
 	shortcutFlag := flag.Bool("install-shortcut", false, "create a Desktop shortcut that starts MyRouter in tray mode")
 	autostartFlag := flag.Bool("autostart", false, "also launch MyRouter at login (implies -install-shortcut)")
 	installOnlyFlag := flag.Bool("install-only", false, "install the desktop shortcut and exit")
 	flag.Parse()
+
+	showTray := *trayFlag && !*noTrayFlag
 
 	if *showVersion {
 		fmt.Println(version)
@@ -58,10 +69,17 @@ func main() {
 		cfg.Addr = *addrFlag
 	}
 
+	// Services, scheduled tasks and session-0 containers have no desktop; a
+	// tray icon cannot exist there, so fall back to headless mode quietly.
+	if showTray && !tray.Interactive() {
+		log.Info("no interactive desktop detected; system tray disabled")
+		showTray = false
+	}
+
 	dashboardURL := dashboardAddr(cfg.Addr)
 	// Double-clicking the desktop icon while MyRouter is already running should
 	// focus the dashboard instead of failing to bind the port.
-	if (*trayFlag || *openFlag) && alreadyRunning(cfg.Addr) {
+	if (showTray || *openFlag) && alreadyRunning(cfg.Addr) {
 		if err := tray.OpenBrowser(dashboardURL); err != nil {
 			log.Warn("could not open dashboard", logx.F("error", err.Error()))
 		}
@@ -87,8 +105,10 @@ func main() {
 		os.Exit(1)
 	}
 	// The desktop build is linked with -H windowsgui (no console), so mirror
-	// logs to a file the operator can inspect when the tray misbehaves.
-	if *trayFlag {
+	// logs to a file the operator can inspect when the tray misbehaves. A
+	// console build launched by double-click also hides its console, so the
+	// file is the only place to see startup problems there too.
+	if showTray {
 		if f, err := os.OpenFile(filepath.Join(cfg.DataDir, "myrouter.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
 			logx.SetOutput(f)
 			defer f.Close()
@@ -112,12 +132,26 @@ func main() {
 	if err := seedDefaults(db); err != nil {
 		log.Warn("seed defaults failed", logx.F("error", err.Error()))
 	}
+	// Built-in skills are seeded once and bound globally, so every model alias
+	// automatically inherits them (including routes created later).
+	if err := db.SeedBuiltinSkills(); err != nil {
+		log.Warn("seed skills failed", logx.F("error", err.Error()))
+	}
 	gatewayURL := gatewayBaseURL(db, dashboardURL)
 
 	allowPrivate := settingBool(db, "allow_private_upstreams", cfg.DevMode)
 	trusted := guard.TrustedProxiesFromSettings(db)
 	registry := provider.NewRegistry(provider.GuardedClient(allowPrivate, 0))
 	identity := guard.NewIdentity(trusted)
+	// Official model metadata (context window, prices per 1M tokens, vision /
+	// tools / reasoning capabilities) from the models.dev catalog. Loading the
+	// cached/embedded snapshot is instant; the network refresh runs in the
+	// background and never blocks startup.
+	modelCatalog := modelspec.New(cfg.DataDir)
+	if err := modelCatalog.Load(); err != nil {
+		log.Warn("model catalog cache load failed", logx.F("error", err.Error()))
+	}
+
 	engine := guard.New(db, guard.ZLogger{L: log})
 	gw := gateway.New(gateway.Options{
 		DB: db, Registry: registry, Box: box, Guard: engine, Identity: identity,
@@ -125,7 +159,8 @@ func main() {
 	})
 	admin := api.New(api.Deps{
 		DB: db, Box: box, Registry: registry, Guard: engine, Gateway: gw, Identity: identity, Log: log,
-		Config: api.ServerConfig{Version: version, AllowPrivate: allowPrivate, DevMode: cfg.DevMode},
+		Config:  api.ServerConfig{Version: version, AllowPrivate: allowPrivate, DevMode: cfg.DevMode},
+		Catalog: modelCatalog,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -133,6 +168,13 @@ func main() {
 	engine.Start(ctx)
 	monitor.New(db, registry, box, 5*time.Minute, log).Start(ctx)
 	go runScheduler(ctx, db, engine, cfg, log)
+	// Refresh retrieval skills (local code tree, ai-memory wiki) in the
+	// background so their indexes stay current without manual syncs.
+	go skills.NewSyncer(db, log).Run(ctx)
+	// Keep the model metadata catalog fresh and backfill models that were
+	// discovered before the catalog was available.
+	go modelCatalog.Start(ctx)
+	go modelmeta.BackfillLoop(ctx, db, modelCatalog, log)
 
 	mux := http.NewServeMux()
 	mux.Handle("/admin/", admin.Handler())
@@ -177,14 +219,26 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	quit := make(chan struct{}, 1)
-	if *trayFlag {
+	var trayErr <-chan error
+	if showTray {
+		errCh := make(chan error, 1)
+		trayErr = errCh
 		go func() {
-			err := tray.Run(tray.Options{
+			// Run returns nil after a normal Quit (the quit channel already
+			// carries that signal), so only real failures are reported here.
+			if err := tray.Run(tray.Options{
 				Tooltip:      "MyRouter — running",
 				DashboardURL: dashboardURL,
 				GatewayURL:   gatewayURL,
 				OnReady: func() {
-					log.Info("tray icon ready", logx.F("dashboard", dashboardURL))
+					// A console build launched by double-click owns its console;
+					// hide it so the app looks like a normal tray app. A console
+					// shared with a terminal (CLI run) is left visible.
+					if tray.HideOwnConsole() {
+						log.Info("tray ready; console window hidden")
+					} else {
+						log.Info("tray icon ready", logx.F("dashboard", dashboardURL))
+					}
 				},
 				OnQuit: func() {
 					select {
@@ -192,15 +246,36 @@ func main() {
 					default:
 					}
 				},
-			})
-			if err != nil {
-				log.Warn("system tray unavailable", logx.F("error", err.Error()))
+			}); err != nil {
+				errCh <- err
 			}
 		}()
 	}
-	select {
-	case <-stop:
-	case <-quit:
+	running := true
+	for running {
+		select {
+		case <-stop:
+			running = false
+		case <-quit:
+			running = false
+		case err := <-trayErr:
+			trayErr = nil
+			if errors.Is(err, tray.ErrUnsupported) {
+				log.Debug("system tray not supported on this platform")
+				continue
+			}
+			log.Warn("system tray unavailable", logx.F("error", err.Error()))
+			// A GUI build has no console, so a failed tray would leave an
+			// invisible background process the user can only kill from Task
+			// Manager. Tell them and exit instead of hanging around.
+			if !tray.HasConsole() {
+				tray.ShowError("MyRouter",
+					"Ikon system tray gagal dibuat:\n\n"+err.Error()+
+						"\n\nMyRouter akan ditutup. Jalankan dengan -no-tray untuk mode headless, "+
+						"atau periksa log di data\\myrouter.log.")
+				running = false
+			}
+		}
 	}
 	// Quitting (tray menu, Ctrl+C, SIGTERM) means the whole system stops:
 	// remove the tray icon, cancel every background worker (guard engine,

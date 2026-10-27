@@ -4,6 +4,7 @@ import { Activity, AlertTriangle, KeyRound, RefreshCw, Server, Route as RouteIco
 import { PageHeader, StatCard, Card, CardHeader, SkeletonCard } from '../components/ui/Layout';
 import { ConnectPanel } from '../components/ConnectPanel';
 import { LiveRoutingCard } from '../components/LiveRouting';
+import { LiveLogCard } from '../components/LiveLog';
 import { SecretReveal } from '../components/ui/CopyField';
 import { Badge, StatusBadge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -13,16 +14,11 @@ import type { SeriesPoint } from '../lib/types';
 
 import {
   activityBadge,
-  classNames,
   formatCompact,
+  formatCost,
   formatLatency,
   formatNumber,
   formatTime,
-  providerInitial,
-  providerHue,
-  providerTypeLabel,
-  relativeTime,
-  statusSpec,
 } from '../lib/format';
 
 const CHART_W = 680;
@@ -377,6 +373,12 @@ export function DashboardPage() {
     { cacheKey: 'overview', refreshMs: 15000 },
   );
   const { data: live } = useQuery(() => admin.live(), { cacheKey: 'live', refreshMs: 2000 });
+  // Est. spend for the last 24h: reuse the provider-grouped usage rows and sum
+  // the catalog-priced estimates (null when no row has a price).
+  const { data: spendData } = useQuery(() => admin.usage('provider', 1), {
+    cacheKey: 'spend-24h',
+    refreshMs: 60000,
+  });
   // Chart range switcher (24h / 3d / 7d). Each range has its own cache entry,
   // so switching back is instant and the per-bucket aggregates (ok/failed/
   // blocked/fallbacks/tokens/latency) come from /overview/series for the range.
@@ -445,6 +447,10 @@ export function DashboardPage() {
   const m = data.metrics;
   const successRate = m.requests ? m.success_rate : 0;
   const fallbackPct = m.requests ? (m.fallbacks / m.requests) * 100 : 0;
+  const pricedSpend = (spendData?.data ?? []).filter((row) => row.est_cost !== null);
+  const spendTotal = pricedSpend.length
+    ? pricedSpend.reduce((acc, row) => acc + (row.est_cost ?? 0), 0)
+    : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -475,13 +481,19 @@ export function DashboardPage() {
         }
       />
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
         <StatCard label="Providers" value={String(m.providers)} hint={m.providers ? 'All upstreams' : 'None configured'} tone="default" icon={<Server size={15} />} />
         <StatCard label="Active Routes" value={String(m.active_routes)} hint="enabled aliases" icon={<RouteIcon size={15} />} />
         <StatCard label="Requests (24h)" value={formatNumber(m.requests)} hint={m.requests ? 'last 24 hours' : 'no traffic yet'} tone={m.requests ? 'success' : 'default'} />
         <StatCard label="Success Rate" value={`${successRate.toFixed(1)}%`} hint={`Avg latency ${formatLatency(m.avg_latency_ms)}`} tone={successRate >= 99 ? 'success' : successRate >= 95 ? 'warning' : 'danger'} />
         <StatCard label="Fallbacks" value={formatNumber(m.fallbacks)} hint={`${fallbackPct.toFixed(1)}% triggered`} tone={m.fallbacks ? 'warning' : 'default'} />
         <StatCard label="Tokens" value={formatCompact(m.in_tokens + m.out_tokens)} hint={`${formatCompact(m.in_tokens)} in / ${formatCompact(m.out_tokens)} out`} />
+        <StatCard
+          label="Est. spend (24h)"
+          value={spendTotal === null ? 'Unavailable' : formatCost(spendTotal)}
+          hint={spendTotal === null ? 'no priced usage' : 'estimated from catalog prices'}
+          tone={spendTotal === null ? 'default' : 'accent'}
+        />
       </div>
 
       <LiveRoutingCard providers={data.providers} live={live ?? undefined} />
@@ -582,8 +594,8 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+        <Card className="lg:col-span-2">
           <CardHeader
             title="Recent Activity"
             description="Latest gateway requests"
@@ -627,37 +639,7 @@ export function DashboardPage() {
           )}
         </Card>
 
-        <Card>
-          <CardHeader title="Provider Health" description="Status of configured upstreams" />
-          {data.providers.length === 0 ? (
-            <div className="flex flex-col items-start gap-2 py-6">
-              <p className="text-[12.5px] text-muted">No providers configured yet.</p>
-              <Link to="/providers">
-                <Button variant="primary" size="compact">Add Provider</Button>
-              </Link>
-            </div>
-          ) : (
-            <ul className="flex flex-col divide-y divide-border">
-              {data.providers.map((p) => (
-                <li key={p.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <span className={classNames('flex h-8 w-8 items-center justify-center rounded-[8px] text-[12px] font-bold', providerHue(p.name))}>
-                      {providerInitial(p.name)}
-                    </span>
-                    <div className="min-w-0">
-                      <p className="truncate text-[12.5px] font-medium text-text">{p.name}</p>
-                      <p className="truncate text-[11px] text-muted">{providerTypeLabel[p.type] ?? p.type} · {p.model_count} models</p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1">
-                    <StatusBadge spec={statusSpec[p.status]} />
-                    <span className="font-mono text-[10.5px] text-muted">{relativeTime(p.last_check)}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
+        <LiveLogCard live={live} />
       </div>
     </div>
   );

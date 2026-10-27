@@ -20,7 +20,7 @@ function readCookie(name: string): string {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   signal?: AbortSignal;
 }
@@ -201,8 +201,9 @@ export const admin = {
   providers: {
     list: () => api<{ data: import('./types').Provider[] }>('/providers'),
     get: (id: string) => api<{ data: import('./types').Provider }>(`/providers/${id}`),
-    create: (body: unknown) => api<{ data: import('./types').Provider }>('/providers', { method: 'POST', body }),
-    update: (id: string, body: unknown) => api<{ data: import('./types').Provider }>(`/providers/${id}`, { method: 'PATCH', body }),
+    create: (body: unknown) => api<import('./types').ProviderSaveResult>('/providers', { method: 'POST', body }),
+    update: (id: string, body: unknown) =>
+      api<import('./types').ProviderSaveResult>(`/providers/${id}`, { method: 'PATCH', body }),
     remove: (id: string) => api<{ ok: boolean }>(`/providers/${id}`, { method: 'DELETE' }),
     test: (id: string) => api<{ status: string; message: string; latency_ms: number }>(`/providers/${id}/test`, { method: 'POST' }),
     testDraft: (body: { type: string; base_url: string; api_key: string; provider_id?: string }) =>
@@ -218,9 +219,58 @@ export const admin = {
   routes: {
     list: () => api<{ data: import('./types').Route[] }>('/routes'),
     create: (body: unknown) => api<{ data: import('./types').Route }>('/routes', { method: 'POST', body }),
-    auto: () => api<{ created: number; skipped: number; data: import('./types').Route[] }>('/routes/auto', { method: 'POST', body: {} }),
+    auto: (body: { model_ids?: string[] } = {}) =>
+      api<{ created: number; skipped: number; data: import('./types').Route[] }>('/routes/auto', {
+        method: 'POST',
+        body,
+      }),
+    bulk: (body: { action: 'enable' | 'disable' | 'delete'; ids: string[] }) =>
+      api<{ updated?: number; deleted?: number }>('/routes/bulk', { method: 'POST', body }),
     update: (id: string, body: unknown) => api<{ data: import('./types').Route }>(`/routes/${id}`, { method: 'PATCH', body }),
     remove: (id: string) => api<{ ok: boolean }>(`/routes/${id}`, { method: 'DELETE' }),
+  },
+
+  skills: {
+    list: () => api<{ data: import('./types').Skill[] }>('/skills'),
+    get: (id: string) => api<{ data: import('./types').Skill }>(`/skills/${id}`),
+    create: (body: {
+      name: string;
+      description: string;
+      type: import('./types').SkillType;
+      enabled: boolean;
+      config: Record<string, unknown>;
+    }) => api<{ data: import('./types').Skill }>('/skills', { method: 'POST', body }),
+    update: (
+      id: string,
+      body: { name?: string; description?: string; enabled?: boolean; config?: Record<string, unknown> },
+    ) => api<{ data: import('./types').Skill }>(`/skills/${id}`, { method: 'PATCH', body }),
+    remove: (id: string) => api<{ ok: boolean }>(`/skills/${id}`, { method: 'DELETE' }),
+    setBindings: (id: string, body: import('./types').SkillBindings) =>
+      api<{ data: import('./types').Skill }>(`/skills/${id}/bindings`, { method: 'PUT', body }),
+    sync: (id: string) => api<{ data: import('./types').SkillSyncResult }>(`/skills/${id}/sync`, { method: 'POST' }),
+    items: (id: string, q?: string, limit = 50) => {
+      const params = new URLSearchParams();
+      if (q) params.set('q', q);
+      params.set('limit', String(limit));
+      return api<{ data: { items: import('./types').SkillItem[]; total: number } }>(
+        `/skills/${id}/items?${params.toString()}`,
+      );
+    },
+    createItem: (
+      id: string,
+      body: { title: string; content: string; source?: string; kind?: string },
+    ) => api<{ data: import('./types').SkillItem }>(`/skills/${id}/items`, { method: 'POST', body }),
+    deleteItem: (id: string, itemId: string) =>
+      api<{ ok: boolean }>(`/skills/${id}/items/${itemId}`, { method: 'DELETE' }),
+    preview: (id: string, q: string) =>
+      api<{ data: import('./types').SkillPreview }>(`/skills/${id}/preview?q=${encodeURIComponent(q)}`),
+    importPreview: (url: string) =>
+      api<{ data: import('./types').SkillImportPreview }>('/skills/import/preview', {
+        method: 'POST',
+        body: { url },
+      }),
+    importSkill: (body: import('./types').SkillImportRequest) =>
+      api<{ data: import('./types').Skill }>('/skills/import', { method: 'POST', body }),
   },
 
   keys: {
@@ -272,6 +322,11 @@ export const admin = {
       group_by: string;
       days: number;
     }>(`/usage?group_by=${groupBy}&days=${days}`),
+
+  // Per-model usage with official catalog prices; `est_cost`, `price_in`, and
+  // `price_out` are null for models the catalog does not know.
+  usageModels: (days: number) =>
+    api<{ data: import('./types').UsageModelRow[]; days: number }>(`/usage/models?days=${days}`),
 
   settings: {
     get: () =>

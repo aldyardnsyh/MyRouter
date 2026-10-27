@@ -262,3 +262,21 @@ type UsageRow struct {
 	OutTokens int64    `json:"out_tokens"`
 	EstCost   *float64 `json:"est_cost"`
 }
+
+// UsageModelRow is a per-provider/per-model usage aggregate with the official
+// unit prices that produced the estimate.
+type UsageModelRow struct {
+	ProviderID   string   `json:"provider_id"`
+	ProviderName string   `json:"provider_name"`
+	ProviderType string   `json:"provider_type"`
+	ModelID      string   `json:"model_id"`
+	ModelName    string   `json:"model_name"`
+	Requests     int64    `json:"requests"`
+	OK           int64    `json:"ok"`
+	Failed       int64    `json:"failed"`
+	InTokens     int64    `json:"in_tokens"`
+	OutTokens    int64    `json:"out_tokens"`
+	EstCost      *float64 `json:"est_cost"`
+	PriceIn      *float64 `json:"price_in"`
+	PriceOut     *float64 `json:"price_out"`
+}

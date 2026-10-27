@@ -193,7 +193,15 @@ func (db *DB) Metrics(since int64) (*MetricSet, error) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM provider WHERE enabled=1`).Scan(&m.Providers); err != nil {
 		return nil, err
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM route WHERE enabled=1`).Scan(&m.ActiveRoutes); err != nil {
+	// A route only counts as active when at least one target can serve, which
+	// requires both an available model and an enabled provider. Otherwise a
+	// disabled provider would leave stale aliases counted as live.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM route r WHERE r.enabled=1 AND EXISTS (
+		SELECT 1 FROM route_target t
+		JOIN model m ON m.id = t.model_id
+		JOIN provider p ON p.id = m.provider_id
+		WHERE t.route_id = r.id AND m.available=1 AND p.enabled=1
+	)`).Scan(&m.ActiveRoutes); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -225,16 +233,16 @@ func (db *DB) RequestsSeries(hours int) ([]int64, error) {
 // SeriesPoint is one bucket of the dashboard chart. Every field is real data
 // from request_log so the chart, the tooltip and the summary agree.
 type SeriesPoint struct {
-	Start       int64   `json:"start"`
-	Requests    int64   `json:"requests"`
-	OK          int64   `json:"ok"`
-	Failed      int64   `json:"failed"`
-	Blocked     int64   `json:"blocked"`
-	Fallbacks   int64   `json:"fallbacks"`
-	InTokens    int64   `json:"in_tokens"`
-	OutTokens   int64   `json:"out_tokens"`
-	AvgLatency  float64 `json:"avg_latency_ms"`
-	MaxLatency  int64   `json:"max_latency_ms"`
+	Start      int64   `json:"start"`
+	Requests   int64   `json:"requests"`
+	OK         int64   `json:"ok"`
+	Failed     int64   `json:"failed"`
+	Blocked    int64   `json:"blocked"`
+	Fallbacks  int64   `json:"fallbacks"`
+	InTokens   int64   `json:"in_tokens"`
+	OutTokens  int64   `json:"out_tokens"`
+	AvgLatency float64 `json:"avg_latency_ms"`
+	MaxLatency int64   `json:"max_latency_ms"`
 }
 
 // ChartSeries buckets request_log into n buckets of bucketDur seconds ending
@@ -332,6 +340,59 @@ func (db *DB) AddUsage(date, routeID, providerID, apiKeyID, status string, inTok
 			                ELSE COALESCE(est_cost,0) + COALESCE(excluded.est_cost,0) END`,
 		date, routeID, providerID, apiKeyID, ok, failed, fb, inTokens, outTokens, cost)
 	return err
+}
+
+// AddModelUsage upserts usage_model_daily for one successful request.
+func (db *DB) AddModelUsage(date, providerID, modelID, status string, inTokens, outTokens int, cost *float64) error {
+	ok, failed := 0, 0
+	switch status {
+	case "ok":
+		ok = 1
+	case "error":
+		failed = 1
+	}
+	_, err := db.Exec(`INSERT INTO usage_model_daily (date, provider_id, model_id, requests, ok, failed, in_tokens, out_tokens, est_cost)
+		VALUES (?,?,?,1,?,?,?,?,?)
+		ON CONFLICT(date, provider_id, model_id) DO UPDATE SET
+			requests = requests + 1, ok = ok + excluded.ok, failed = failed + excluded.failed,
+			in_tokens = in_tokens + excluded.in_tokens, out_tokens = out_tokens + excluded.out_tokens,
+			est_cost = CASE WHEN est_cost IS NULL AND excluded.est_cost IS NULL THEN NULL
+			                ELSE COALESCE(est_cost,0) + COALESCE(excluded.est_cost,0) END`,
+		date, providerID, modelID, ok, failed, inTokens, outTokens, cost)
+	return err
+}
+
+// UsageModelAggregate returns spend per provider+model since a date.
+func (db *DB) UsageModelAggregate(since string) ([]model.UsageModelRow, error) {
+	rows, err := db.Query(`SELECT
+		u.provider_id, COALESCE(p.name,'Unknown'), COALESCE(p.type,''),
+		u.model_id, COALESCE(NULLIF(m.display_name,''), NULLIF(m.model_id,''), u.model_id),
+		COALESCE(SUM(u.requests),0), COALESCE(SUM(u.ok),0), COALESCE(SUM(u.failed),0),
+		COALESCE(SUM(u.in_tokens),0), COALESCE(SUM(u.out_tokens),0),
+		CASE WHEN SUM(CASE WHEN u.est_cost IS NOT NULL THEN 1 ELSE 0 END) = 0 THEN NULL ELSE SUM(COALESCE(u.est_cost,0)) END,
+		m.price_in, m.price_out
+		FROM usage_model_daily u
+		LEFT JOIN provider p ON p.id = u.provider_id
+		LEFT JOIN model m ON m.id = u.model_id
+		WHERE u.date >= ?
+		GROUP BY u.provider_id, u.model_id
+		ORDER BY COALESCE(SUM(u.est_cost),0) DESC, SUM(u.in_tokens + u.out_tokens) DESC
+		LIMIT 200`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.UsageModelRow{}
+	for rows.Next() {
+		var r model.UsageModelRow
+		if err := rows.Scan(&r.ProviderID, &r.ProviderName, &r.ProviderType,
+			&r.ModelID, &r.ModelName, &r.Requests, &r.OK, &r.Failed,
+			&r.InTokens, &r.OutTokens, &r.EstCost, &r.PriceIn, &r.PriceOut); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // UsageAggregate groups usage_daily by a dimension: route|provider|key|day.

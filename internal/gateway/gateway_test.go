@@ -38,6 +38,9 @@ func newTestGateway(t *testing.T, primaryMode, backupMode string) (*Gateway, *st
 			}
 			w.Header().Set("Content-Type", "application/json")
 			switch mode {
+			case "402":
+				w.WriteHeader(http.StatusPaymentRequired)
+				fmt.Fprint(w, `{"error":{"message":"billing","type":"billing_error"}}`)
 			case "429":
 				w.WriteHeader(http.StatusTooManyRequests)
 				fmt.Fprint(w, `{"error":{"message":"limited"}}`)
@@ -81,7 +84,8 @@ func newTestGateway(t *testing.T, primaryMode, backupMode string) (*Gateway, *st
 	m1, _ := db.UpsertModel(&model.Model{ProviderID: p1.ID, ModelID: "test-model", DisplayName: "T1", Available: true})
 	m2, _ := db.UpsertModel(&model.Model{ProviderID: p2.ID, ModelID: "test-model", DisplayName: "T2", Available: true})
 
-	route := &model.Route{Alias: "coding", Enabled: true, Strategy: "priority", Retry: 0, TimeoutMS: 5000}
+	route := &model.Route{Alias: "coding", Enabled: true, Strategy: "priority", Retry: 0, TimeoutMS: 5000,
+		FallbackOn: "rate_limit,timeout,upstream_5xx,network,billing"}
 	route.Targets = []model.RouteTarget{{ModelID: m1, Role: "primary"}, {ModelID: m2, Role: "fallback"}}
 	if err := db.SaveRoute(route); err != nil {
 		t.Fatal(err)
@@ -304,5 +308,54 @@ func TestPlaygroundUnknownRoute(t *testing.T) {
 		Route: "nope", Messages: []provider.ChatMessage{provider.NewTextMessage("user", "x")},
 	}); err == nil {
 		t.Fatal("expected an error for an unknown route")
+	}
+}
+
+func TestFallbackOnBilling402(t *testing.T) {
+	g, _, _ := newTestGateway(t, "402", "ok")
+	out := runChat(t, g, "test-key-secret")
+	if out.Err != nil {
+		t.Fatalf("expected billing fallback success, got: %s trace=%+v", out.Err.Message, out.Trace)
+	}
+	if out.Response.Content != "from backup" || !out.Fallback {
+		t.Fatalf("content=%q fallback=%v", out.Response.Content, out.Fallback)
+	}
+	if len(out.Trace) != 2 || out.Trace[0].Category != "billing" || out.Trace[1].Outcome != "success" {
+		t.Fatalf("trace = %+v", out.Trace)
+	}
+}
+
+func TestBreakerSkipsCoolingProvider(t *testing.T) {
+	g, _, _ := newTestGateway(t, "402", "ok")
+	first := runChat(t, g, "test-key-secret")
+	if first.Err != nil || first.Response.Content != "from backup" {
+		t.Fatalf("first call: err=%v content=%q", first.Err, first.Response.Content)
+	}
+	second := runChat(t, g, "test-key-secret")
+	if second.Err != nil || second.Response.Content != "from backup" {
+		t.Fatalf("second call: err=%v content=%q", second.Err, second.Response.Content)
+	}
+	if len(second.Trace) != 2 || second.Trace[0].Outcome != "skipped" || second.Trace[0].Category != "cooldown" {
+		t.Fatalf("expected primary to be skipped while cooling down, trace=%+v", second.Trace)
+	}
+}
+
+func TestRoundRobinRotatesAccounts(t *testing.T) {
+	g, db, _ := newTestGateway(t, "ok", "ok")
+	route, err := db.RouteByAlias("coding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	route.Strategy = "round_robin"
+	if err := db.SaveRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	first := runChat(t, g, "test-key-secret")
+	second := runChat(t, g, "test-key-secret")
+	if first.Response == nil || first.Response.Content != "from primary" {
+		t.Fatalf("first call content=%v err=%v", first.Response, first.Err)
+	}
+	if second.Response == nil || second.Response.Content != "from backup" {
+		t.Fatalf("second call content=%v err=%v", second.Response, second.Err)
 	}
 }

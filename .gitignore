@@ -38,3 +38,7 @@ stitch_myrouter_ai_gateway_ui_kit/
 Thumbs.db
 
 myrouter.exe~
+
+# --- Scratch backups from in-session patch runs ---
+.backup-patch-*/
+

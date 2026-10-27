@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { LockKeyhole, User } from 'lucide-react';
 import { LogoWordmark } from '../components/Logo';
 import { Button } from '../components/ui/Button';
-import { Field, Input } from '../components/ui/Field';
+import { Field, Input, PasswordInput } from '../components/ui/Field';
 import { useAuth } from '../lib/auth';
 import { ApiError } from '../lib/api';
 
@@ -13,6 +13,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const passwordRef = useRef<HTMLInputElement>(null);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -22,6 +23,10 @@ export function LoginPage() {
       await login(username.trim(), password);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Sign in failed');
+      // Keep the typed value and put the caret back in the password field so a
+      // retry does not require clearing or re-clicking the input.
+      passwordRef.current?.focus();
+      passwordRef.current?.select();
     } finally {
       setLoading(false);
     }
@@ -49,9 +54,9 @@ export function LoginPage() {
               />
             </Field>
             <Field label="Password" htmlFor="password">
-              <Input
+              <PasswordInput
+                ref={passwordRef}
                 id="password"
-                type="password"
                 autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

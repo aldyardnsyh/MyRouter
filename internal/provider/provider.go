@@ -4,11 +4,11 @@
 package provider
 
 import (
-	"strings"
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // ErrorCategory is the normalized failure taxonomy used by fallback logic.
@@ -27,6 +27,9 @@ const (
 	CatTimeOut ErrorCategory = CatTimeout
 	// CatInvalidRequest: upstream rejected the payload (400/422) — NOT eligible.
 	CatInvalidRequest ErrorCategory = "invalid_request"
+	// CatBilling: upstream rejected the account for billing/quota reasons (402)
+	// — fallback eligible so another account can serve the request.
+	CatBilling ErrorCategory = "billing"
 	// CatAuth: upstream rejected our credential (401/403) — NOT eligible.
 	CatAuth ErrorCategory = "auth"
 	// CatNotFound: unknown model on upstream — NOT eligible.
@@ -38,7 +41,7 @@ const (
 // FallbackEligible reports whether an error category should trigger fallback.
 func FallbackEligible(c ErrorCategory) bool {
 	switch c {
-	case CatRateLimit, CatTimeout, CatUpstream5xx, CatNetwork:
+	case CatRateLimit, CatTimeout, CatUpstream5xx, CatNetwork, CatBilling:
 		return true
 	}
 	return false
@@ -79,11 +82,13 @@ func AsError(err error) *Error {
 // function_call_output.call_id, and dropping it makes upstreams reject the
 // whole conversation.
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"`
-	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content,omitempty"`
+	ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Name             string          `json:"name,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	Reasoning        string          `json:"reasoning,omitempty"`
 }
 
 // Text returns the message content as plain text. Array content is flattened
@@ -134,6 +139,13 @@ type ChatRequest struct {
 	TopP        *float64      `json:"top_p,omitempty"`
 	Stream      bool          `json:"stream,omitempty"`
 	System      string        `json:"system,omitempty"`
+	// SystemExtra is server-side context added by MyRouter skills. Adapters
+	// append it after the client's own system prompt instead of mutating the
+	// client's message list.
+	SystemExtra string `json:"-"`
+	// Headers carries client headers the gateway explicitly forwards to the
+	// upstream (OpenCode session/client headers, User-Agent). Not serialized.
+	Headers http.Header `json:"-"`
 	// Extra holds any additional fields the client sent that the adapter may
 	// forward (stop, presence_penalty, ...). Kept raw on purpose.
 	Extra map[string]any `json:"-"`
@@ -148,16 +160,20 @@ type Usage struct {
 
 // ChatResponse is a normalized non-streaming completion.
 type ChatResponse struct {
-	ID      string
-	Model   string
-	Content string
-	Finish  string
-	Usage   Usage
+	ID        string
+	Model     string
+	Content   string
+	Reasoning string
+	ToolCalls json.RawMessage
+	Finish    string
+	Usage     Usage
 }
 
 // StreamEvent is one normalized streaming chunk.
 type StreamEvent struct {
 	Delta     string
+	Reasoning string
+	ToolCalls json.RawMessage
 	Finish    string
 	InputTok  int
 	OutputTok int

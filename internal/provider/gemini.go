@@ -91,6 +91,12 @@ func (a *GeminiAdapter) ListModels(ctx context.Context, creds Credentials) ([]Mo
 func geminiBody(req ChatRequest) map[string]any {
 	var contents []map[string]any
 	systemText := req.System
+	if extra := strings.TrimSpace(req.SystemExtra); extra != "" {
+		if systemText != "" {
+			systemText += "\n\n"
+		}
+		systemText += extra
+	}
 	for _, m := range req.Messages {
 		if m.Role == "system" {
 			if systemText != "" {
@@ -217,6 +223,8 @@ func (a *GeminiAdapter) MapError(status int, body []byte) *Error {
 	switch {
 	case status == http.StatusTooManyRequests:
 		return &Error{Category: CatRateLimit, StatusCode: status, Message: msg}
+	case status == http.StatusPaymentRequired:
+		return &Error{Category: CatBilling, StatusCode: status, Message: msg}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return &Error{Category: CatAuth, StatusCode: status, Message: msg}
 	case status == http.StatusNotFound:

@@ -4,7 +4,7 @@ import { Plus, RefreshCw, Server, ShieldCheck, Zap } from 'lucide-react';
 import { PageHeader, StatCard, Card, CardHeader } from '../components/ui/Layout';
 import { Callout } from '../components/ui/Layout';
 import { Button } from '../components/ui/Button';
-import { StatusBadge } from '../components/ui/Badge';
+import { Badge, StatusBadge } from '../components/ui/Badge';
 import { DataTable, RowActions, type Column } from '../components/ui/DataTable';
 import { Modal, ConfirmDialog } from '../components/ui/Overlay';
 import { Field, Input, Select } from '../components/ui/Field';
@@ -79,7 +79,6 @@ export function ProvidersPage() {
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
   const [testLine, setTestLine] = useState<{ ok: boolean; text: string } | null>(null);
-  const [testedSignature, setTestedSignature] = useState('');
   const [testing, setTesting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Provider | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -114,10 +113,11 @@ export function ProvidersPage() {
 
   const stats = useMemo(() => {
     const active = providers.filter((p) => p.enabled).length;
+    const disabled = providers.length - active;
     const models = providers.reduce((acc, p) => acc + (p.model_count ?? 0), 0);
     const healthy = providers.filter((p) => p.status === 'connected').length;
     const healthPct = providers.length ? (healthy / providers.length) * 100 : 0;
-    return { active, models, healthy, healthPct };
+    return { active, disabled, models, healthy, healthPct };
   }, [providers]);
 
   async function openCreate() {
@@ -125,7 +125,6 @@ export function ProvidersPage() {
     setForm(emptyForm);
     setFormError('');
     setTestLine(null);
-    setTestedSignature('');
     setPendingBaseUrl(null);
     setModalOpen(true);
   }
@@ -135,7 +134,6 @@ export function ProvidersPage() {
     setForm({ type: p.type, name: p.name, base_url: p.base_url, api_key: '' });
     setFormError('');
     setTestLine(null);
-    setTestedSignature('');
     setPendingBaseUrl(null);
     setModalOpen(true);
   }
@@ -164,45 +162,46 @@ export function ProvidersPage() {
       setFormError('Display name is required');
       return;
     }
-    const nextBaseUrl = form.base_url.trim() || defaultBase[form.type];
-    // Saving is only allowed after a successful test of the current draft.
-    // Editing a name-only change does not require a new test; changing the
-    // host or the key does.
-    const baseChanged = editing ? trimTrailingSlash(nextBaseUrl) !== trimTrailingSlash(editing.base_url) : true;
-    const typeChanged = editing ? form.type !== editing.type : false;
-    const requiresTest = !editing || baseChanged || typeChanged || form.api_key.trim() !== '';
-    const signature = `${form.type}|${trimTrailingSlash(nextBaseUrl)}|${form.api_key.trim()}|${editing?.id ?? 'new'}`;
-    if (requiresTest && !(testLine?.ok && testedSignature === signature)) {
-      setFormError('Test the connection successfully before saving.');
+    if (!editing && !form.api_key.trim()) {
+      setFormError('API key is required for a new provider');
       return;
     }
+    const nextBaseUrl = form.base_url.trim() || defaultBase[form.type];
     if (editing && !confirmBaseUrl && needsBaseUrlConfirmation(editing, nextBaseUrl)) {
       setPendingBaseUrl(nextBaseUrl);
       return;
     }
     setSaving(true);
     try {
-      if (editing) {
-        await admin.providers.update(editing.id, {
-          name: form.name.trim(),
-          type: form.type,
-          base_url: nextBaseUrl,
-          ...(form.api_key ? { api_key: form.api_key } : {}),
-          ...(confirmBaseUrl ? { confirm_base_url: true } : {}),
-        });
-        toast.success('Provider updated');
-      } else {
-        await admin.providers.create({
-          name: form.name.trim(),
-          type: form.type,
-          base_url: nextBaseUrl,
-          api_key: form.api_key,
-        });
-        toast.success('Provider added');
-      }
+      // The backend now tests the connection and imports models as part of the
+      // save, so the response tells us whether the provider is usable without
+      // a separate Test / Refresh Models round trip.
+      const result = editing
+        ? await admin.providers.update(editing.id, {
+            name: form.name.trim(),
+            type: form.type,
+            base_url: nextBaseUrl,
+            ...(form.api_key ? { api_key: form.api_key } : {}),
+            ...(confirmBaseUrl ? { confirm_base_url: true } : {}),
+          })
+        : await admin.providers.create({
+            name: form.name.trim(),
+            type: form.type,
+            base_url: nextBaseUrl,
+            api_key: form.api_key,
+          });
       setPendingBaseUrl(null);
       setModalOpen(false);
       await load(true);
+      if (result.connection.status === 'connected') {
+        if (result.models > 0) {
+          toast.success(`Connected · ${result.models} models discovered`);
+        } else {
+          toast.success('Connected, but no models were returned');
+        }
+      } else {
+        toast.warning(`Saved, but connection failed: ${result.connection.message}`);
+      }
     } catch (err) {
       // Race or a second client: the server still refuses the base URL change.
       // Drop back to the form with the exact reason instead of a generic toast,
@@ -223,7 +222,6 @@ export function ProvidersPage() {
   async function testDraft() {
     setTesting(true);
     setTestLine(null);
-    setTestedSignature('');
     setFormError('');
     try {
       const nextBaseUrl = form.base_url.trim() || defaultBase[form.type];
@@ -244,9 +242,6 @@ export function ProvidersPage() {
       });
       const ok = res.status === 'connected';
       setTestLine({ ok, text: ok ? `Connected in ${res.latency_ms}ms` : res.message || res.status });
-      if (ok) {
-        setTestedSignature(`${form.type}|${trimTrailingSlash(nextBaseUrl)}|${form.api_key.trim()}|${editing?.id ?? 'new'}`);
-      }
     } catch (err) {
       setTestLine({ ok: false, text: err instanceof ApiError ? err.message : 'Connection test failed' });
     } finally {
@@ -313,11 +308,16 @@ export function ProvidersPage() {
       header: 'Provider',
       render: (p) => (
         <div className="flex min-w-0 items-center gap-2.5">
-          <span className={classNames('flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] text-[12px] font-bold', providerHue(p.name))}>
+          <span
+            className={classNames(
+              'flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] text-[12px] font-bold',
+              p.enabled ? providerHue(p.name) : 'bg-surface-2 text-muted',
+            )}
+          >
             {providerInitial(p.name)}
           </span>
           <div className="min-w-0">
-            <p className="truncate font-medium text-text">{p.name}</p>
+            <p className={classNames('truncate font-medium', p.enabled ? 'text-text' : 'text-muted')}>{p.name}</p>
             <p className="truncate font-mono text-[11px] text-muted" title={p.base_url}>{p.base_url}</p>
           </div>
         </div>
@@ -336,8 +336,13 @@ export function ProvidersPage() {
       key: 'status',
       header: 'Status',
       render: (p) => (
-        <div className="flex flex-col items-start gap-0.5">
-          <StatusBadge spec={statusSpec[p.status as Status] ?? statusSpec.unknown} />
+        <div className="flex flex-col items-start gap-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {!p.enabled && <Badge tone="neutral" dot={false}>Disabled</Badge>}
+            <span className={p.enabled ? undefined : 'opacity-60'}>
+              <StatusBadge spec={statusSpec[p.status as Status] ?? statusSpec.unknown} />
+            </span>
+          </div>
           {p.last_error && <span className="max-w-[180px] truncate text-[10.5px] text-danger">{p.last_error}</span>}
         </div>
       ),
@@ -346,12 +351,9 @@ export function ProvidersPage() {
     { key: 'last', header: 'Last check', align: 'right', render: (p) => <span className="font-mono text-[11.5px] text-muted">{relativeTime(p.last_check)}</span> },
   ];
 
-  const draftBaseUrl = form.base_url.trim() || defaultBase[form.type];
-  const draftBaseChanged = editing ? trimTrailingSlash(draftBaseUrl) !== trimTrailingSlash(editing.base_url) : true;
-  const draftRequiresTest = !editing || draftBaseChanged || form.api_key.trim() !== '';
-  const draftSignature = `${form.type}|${trimTrailingSlash(draftBaseUrl)}|${form.api_key.trim()}|${editing?.id ?? 'new'}`;
-  const draftTestPassed = testLine?.ok === true && testedSignature === draftSignature;
-  const canSave = !draftRequiresTest || draftTestPassed;
+  // Saving now also tests the connection and imports models, so no test gate:
+  // a name plus (for a new provider) an API key is enough.
+  const canSave = form.name.trim().length > 0 && (!!editing || form.api_key.trim().length > 0);
 
   return (
     <div className="flex flex-col gap-5">
@@ -371,7 +373,7 @@ export function ProvidersPage() {
       />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Active Upstreams" value={`${stats.active}`} hint={`${providers.length} configured`} icon={<Server size={15} />} />
+        <StatCard label="Active Upstreams" value={`${stats.active}`} hint={stats.disabled ? `${stats.disabled} disabled of ${providers.length}` : `${providers.length} configured`} icon={<Server size={15} />} />
         <StatCard label="Aggregate Models" value={formatNumber(stats.models)} hint="discovered" />
         <StatCard label="Healthy" value={`${stats.healthy}`} hint="connected status" tone="success" icon={<ShieldCheck size={15} />} />
         <StatCard label="Health State" value={`${stats.healthPct.toFixed(1)}%`} hint={providers.length - stats.healthy ? `${providers.length - stats.healthy} need attention` : 'all good'} tone={stats.healthPct === 100 ? 'success' : 'warning'} />
@@ -409,6 +411,7 @@ export function ProvidersPage() {
         error={error}
         onRetry={() => void load()}
         onRowClick={(p) => navigate(`/providers/${p.id}`)}
+        rowClassName={(p) => (p.enabled ? undefined : 'bg-surface/60 [&>td]:opacity-70')}
         empty={
           <div className="flex flex-col items-center gap-2 py-12">
             <Server size={20} className="text-muted" />
@@ -421,8 +424,8 @@ export function ProvidersPage() {
         actions={(p) => (
           <RowActions
             items={[
-              { label: busyId === p.id ? 'Testing…' : 'Test connection', onClick: () => void testProvider(p), disabled: busyId === p.id },
-              { label: 'Refresh models', onClick: () => void refreshModels(p) },
+              { label: busyId === p.id ? 'Testing…' : 'Test connection', onClick: () => void testProvider(p), disabled: busyId === p.id || !p.enabled },
+              { label: 'Refresh models', onClick: () => void refreshModels(p), disabled: busyId === p.id || !p.enabled },
               { label: p.enabled ? 'Disable' : 'Enable', onClick: () => void toggleEnabled(p) },
               { label: 'Edit provider', onClick: () => openEdit(p) },
               { label: 'View details', onClick: () => navigate(`/providers/${p.id}`) },
@@ -472,7 +475,9 @@ export function ProvidersPage() {
         footer={
           <>
             <Button variant="secondary" onClick={closeForm} disabled={saving}>Cancel</Button>
-            <Button variant="primary" onClick={() => void save()} loading={saving} disabled={!canSave}>Save</Button>
+            <Button variant="primary" onClick={() => void save()} loading={saving} disabled={!canSave}>
+              {saving ? 'Saving & checking...' : 'Save'}
+            </Button>
           </>
         }
       >
@@ -514,9 +519,7 @@ export function ProvidersPage() {
             <Button variant="primary" size="compact" onClick={() => void testDraft()} loading={testing} icon={<ShieldCheck size={14} />}>
               Test Connection
             </Button>
-            {draftRequiresTest && !draftTestPassed && (
-              <p className="text-[11.5px] text-muted">Test dulu — tombol Save aktif setelah koneksi berhasil.</p>
-            )}
+            <p className="text-[11.5px] text-muted">Saving tests the connection and imports models automatically.</p>
           </div>
         </div>
       </Modal>

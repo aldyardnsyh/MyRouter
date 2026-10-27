@@ -87,6 +87,13 @@
     @apply text-muted;
   }
 
+  /* The app ships its own always-visible password toggle. Hide the browser's
+     focus-only reveal button so there are never two eyes on the same field. */
+  input::-ms-reveal,
+  input::-ms-clear {
+    display: none;
+  }
+
   /* Thin, quiet scrollbars. */
   * {
     scrollbar-width: thin;
@@ -108,6 +115,24 @@
   .tabular {
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* Toast lifetime indicator. Kept outside Tailwind's layers so the inline
+   animation-duration from Toast.tsx always wins. */
+@keyframes toast-progress {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.toast-progress {
+  transform-origin: left center;
+  animation-name: toast-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
 }
 
 /* Respect reduced motion (PRD §4). */

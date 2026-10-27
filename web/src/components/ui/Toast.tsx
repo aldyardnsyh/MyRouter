@@ -1,82 +1,180 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, AlertTriangle, Info, XCircle, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { classNames } from '../../lib/format';
 
 type ToastKind = 'success' | 'error' | 'info' | 'warning';
+
+interface ToastOptions {
+  /** Overrides the default kind label ("Success", "Something went wrong", …). */
+  title?: string;
+  /** Extra context shown under the main line, e.g. what was skipped and why. */
+  description?: string;
+  /** Auto-dismiss delay in ms. `0` keeps the toast until dismissed. */
+  duration?: number;
+}
 
 interface Toast {
   id: number;
   kind: ToastKind;
   message: string;
+  title?: string;
+  description?: string;
+  duration: number;
 }
 
 interface ToastApi {
-  success: (message: string) => void;
-  error: (message: string) => void;
-  info: (message: string) => void;
-  warning: (message: string) => void;
+  success: (message: string, options?: ToastOptions) => void;
+  error: (message: string, options?: ToastOptions) => void;
+  info: (message: string, options?: ToastOptions) => void;
+  warning: (message: string, options?: ToastOptions) => void;
+  dismiss: (id: number) => void;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-const kindStyles: Record<ToastKind, { icon: ReactNode; ring: string }> = {
-  success: { icon: <CheckCircle2 size={16} className="text-success" />, ring: 'border-success/30' },
-  error: { icon: <XCircle size={16} className="text-danger" />, ring: 'border-danger/30' },
-  warning: { icon: <AlertTriangle size={16} className="text-warning" />, ring: 'border-warning/30' },
-  info: { icon: <Info size={16} className="text-info" />, ring: 'border-info/30' },
+const kindStyles: Record<
+  ToastKind,
+  { icon: ReactNode; wrap: string; bar: string; defaultTitle: string }
+> = {
+  success: {
+    icon: <CheckCircle2 size={17} />,
+    wrap: 'bg-success-soft text-success',
+    bar: 'bg-success',
+    defaultTitle: 'Success',
+  },
+  error: {
+    icon: <XCircle size={17} />,
+    wrap: 'bg-danger-soft text-danger',
+    bar: 'bg-danger',
+    defaultTitle: 'Something went wrong',
+  },
+  warning: {
+    icon: <AlertTriangle size={17} />,
+    wrap: 'bg-warning-soft text-warning',
+    bar: 'bg-warning',
+    defaultTitle: 'Heads up',
+  },
+  info: {
+    icon: <Info size={17} />,
+    wrap: 'bg-info-soft text-info',
+    bar: 'bg-info',
+    defaultTitle: 'Info',
+  },
+};
+
+const defaultDuration: Record<ToastKind, number> = {
+  success: 4600,
+  info: 5200,
+  warning: 6200,
+  error: 8000,
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const counter = useRef(0);
+  const timers = useRef(new Map<number, number>());
 
   const remove = useCallback((id: number) => {
+    const timer = timers.current.get(id);
+    if (timer) window.clearTimeout(timer);
+    timers.current.delete(id);
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Clear timers when the provider unmounts (HMR or route-level remount) so a
+  // pending dismissal never calls setState on a dead component.
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      pending.forEach((timer) => window.clearTimeout(timer));
+      pending.clear();
+    };
+  }, []);
+
   const push = useCallback(
-    (kind: ToastKind, message: string) => {
+    (kind: ToastKind, message: string, options?: ToastOptions) => {
       const id = ++counter.current;
-      setToasts((prev) => [...prev.slice(-3), { id, kind, message }]);
-      window.setTimeout(() => remove(id), 4200);
+      const duration = options?.duration ?? defaultDuration[kind];
+      const toast: Toast = {
+        id,
+        kind,
+        message,
+        title: options?.title,
+        description: options?.description,
+        duration,
+      };
+      // Keep at most four; drop the oldest so a burst of bulk errors never
+      // covers the page (and its close buttons stay reachable).
+      setToasts((prev) => [...prev.slice(-3), toast]);
+      if (duration > 0) {
+        timers.current.set(id, window.setTimeout(() => remove(id), duration));
+      }
     },
     [remove],
   );
 
   const api: ToastApi = {
-    success: (m) => push('success', m),
-    error: (m) => push('error', m),
-    info: (m) => push('info', m),
-    warning: (m) => push('warning', m),
+    success: (message, options) => push('success', message, options),
+    error: (message, options) => push('error', message, options),
+    info: (message, options) => push('info', message, options),
+    warning: (message, options) => push('warning', message, options),
+    dismiss: remove,
   };
 
   return (
     <ToastContext.Provider value={api}>
       {children}
       {createPortal(
-        <div className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 w-[340px]">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              role={t.kind === 'error' ? 'alert' : 'status'}
-              aria-live={t.kind === 'error' ? 'assertive' : 'polite'}
-              className={classNames(
-                'flex items-start gap-2.5 rounded-card border bg-bg px-3.5 py-3 shadow-[var(--shadow-overlay)] animate-fade-in',
-                kindStyles[t.kind].ring,
-              )}
-            >
-              <span className="mt-0.5 shrink-0">{kindStyles[t.kind].icon}</span>
-              <p className="flex-1 text-[12.5px] text-text leading-snug">{t.message}</p>
-              <button
-                onClick={() => remove(t.id)}
-                className="text-muted hover:text-text transition-colors shrink-0"
-                aria-label="Dismiss"
+        <div
+          className="fixed bottom-4 right-4 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2.5"
+          aria-label="Notifications"
+        >
+          {toasts.map((t) => {
+            const style = kindStyles[t.kind];
+            return (
+              <div
+                key={t.id}
+                role={t.kind === 'error' ? 'alert' : 'status'}
+                aria-live={t.kind === 'error' ? 'assertive' : 'polite'}
+                className="relative overflow-hidden rounded-card border border-border bg-bg shadow-[var(--shadow-overlay)] animate-fade-in"
               >
-                <X size={14} />
-              </button>
-            </div>
-          ))}
+                <div className="flex items-start gap-3 px-3.5 py-3">
+                  <span
+                    className={classNames(
+                      'mt-px flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
+                      style.wrap,
+                    )}
+                  >
+                    {style.icon}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12.5px] font-semibold leading-snug text-text">
+                      {t.title ?? style.defaultTitle}
+                    </p>
+                    <p className="mt-0.5 text-[12.5px] leading-snug text-muted">{t.message}</p>
+                    {t.description && (
+                      <p className="mt-1 text-[11.5px] leading-snug text-muted/90">{t.description}</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => remove(t.id)}
+                    className="shrink-0 rounded-control p-1 text-muted transition-colors hover:bg-surface-2 hover:text-text"
+                    aria-label="Dismiss notification"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                {t.duration > 0 && (
+                  <span
+                    aria-hidden
+                    className={classNames('toast-progress absolute inset-x-0 bottom-0 h-[2px]', style.bar)}
+                    style={{ animationDuration: `${t.duration}ms` }}
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>,
         document.body,
       )}

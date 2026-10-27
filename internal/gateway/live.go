@@ -63,6 +63,17 @@ func (t *liveTracker) setProvider(id, providerID, providerName string) {
 	t.mu.Unlock()
 }
 
+// setStatus marks an in-flight request, for example "streaming" once the
+// upstream stream has started. It does not move the request out of the active
+// set; finish does that.
+func (t *liveTracker) setStatus(id, status string) {
+	t.mu.Lock()
+	if req, ok := t.active[id]; ok {
+		req.Status = status
+	}
+	t.mu.Unlock()
+}
+
 // finish moves a request out of the active set. It is idempotent so handlers
 // can call it on every path plus a deferred safety net.
 func (t *liveTracker) finish(id, status string) {

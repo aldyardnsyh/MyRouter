@@ -4,9 +4,13 @@
 package tray
 
 import (
+	"errors"
 	"os/exec"
 	"runtime"
 )
+
+// ErrUnsupported is returned when the tray is requested on a non-Windows host.
+var ErrUnsupported = errors.New("system tray is only supported on Windows")
 
 // Options configures the tray icon.
 type Options struct {

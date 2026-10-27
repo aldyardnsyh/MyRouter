@@ -57,6 +57,32 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
+// forwardClientHeaders copies the OpenCode client headers that the free tier
+// validates. The gateway authenticates the MyRouter key; it must not forward
+// that Authorization header upstream.
+func forwardClientHeaders(h http.Header) http.Header {
+	out := http.Header{}
+	for _, k := range []string{
+		"User-Agent",
+		"x-opencode-session-id",
+		"x-opencode-session",
+		"x-opencode-request",
+		"x-opencode-client",
+		"x-opencode-project",
+		"x-opencode-parent-session-id",
+		"x-parent-session-id",
+		"x-opencode-directory",
+		"x-opencode-workspace",
+		"x-session-affinity",
+		"X-Session-Id",
+	} {
+		if v := h.Values(k); len(v) > 0 {
+			out[http.CanonicalHeaderKey(k)] = v
+		}
+	}
+	return out
+}
+
 func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	requestID := store.RandomHex(8)
 	w.Header().Set("X-Request-Id", requestID)
@@ -80,6 +106,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		WriteOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error(), 0)
 		return
 	}
+	input.Headers = forwardClientHeaders(r.Header)
 
 	route, err := g.db.RouteByAlias(input.Model)
 	if err != nil {
@@ -158,6 +185,14 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Server-side skills run after Guard admits the request: vision bridging
+	// may call a vision model, and a blocked key must never spend upstream
+	// quota. Fail-open by design.
+	skillRT := g.applySkills(r.Context(), prep)
+	if len(skillRT.names) > 0 {
+		w.Header().Set("X-MyRouter-Skills", strings.Join(skillRT.names, ","))
+	}
+
 	// Provider-level Guard: re-check with every target provider so a provider
 	// quota cannot be exceeded via fallback.
 	release := g.guard.Acquire(prep.GuardRequest(primaryProv))
@@ -184,12 +219,13 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		g.live.finish(liveID, "error")
 		status := statusFor(outcome.Err)
 		g.logActivity(requestID, started, r, auth, route, outcome.Provider, "error", status, latency.Milliseconds(),
-			outcome.InTokens, outcome.OutTokens, "", outcome.Err.Message, outcome.Trace)
+			outcome.InTokens, outcome.OutTokens, "", outcome.Err.Message, prep.traceWith(outcome.Trace))
 		WriteOpenAIError(w, status, "upstream_error", string(outcome.Err.Category), outcome.Err.Message, 0)
 		return
 	}
 
 	if outcome.StreamStarted {
+		g.live.setStatus(liveID, "streaming")
 		streamStatus := g.streamResponse(w, r, prep, outcome, requestID, started)
 		g.live.finish(liveID, streamStatus)
 		return
@@ -209,10 +245,18 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		fallbackFrom = input.Model
 	}
 	g.logActivity(requestID, started, r, auth, route, outcome.Provider, status, http.StatusOK,
-		latency.Milliseconds(), resp.Usage.InputTokens, resp.Usage.OutputTokens, fallbackFrom, "", outcome.Trace)
+		latency.Milliseconds(), resp.Usage.InputTokens, resp.Usage.OutputTokens, fallbackFrom, "", prep.traceWith(outcome.Trace))
 	g.recordUsage(route, outcome.Provider, auth.Key, status, resp.Usage, outcome.Fallback, outcome.Model)
 	g.live.finish(liveID, "ok")
+	go g.captureSkills(prep, resp.Content)
 
+	message := map[string]any{"role": "assistant", "content": resp.Content}
+	if resp.Reasoning != "" {
+		message["reasoning_content"] = resp.Reasoning
+	}
+	if len(resp.ToolCalls) > 0 {
+		message["tool_calls"] = json.RawMessage(resp.ToolCalls)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      "chatcmpl-" + requestID,
 		"object":  "chat.completion",
@@ -220,7 +264,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		"model":   input.Model,
 		"choices": []map[string]any{{
 			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": resp.Content},
+			"message":       message,
 			"finish_reason": defaultFinish(resp.Finish),
 		}},
 		"usage": map[string]any{
@@ -247,7 +291,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, prep *P
 	firstChunk := true
 	// writeFailed records a broken client connection so the loop can stop.
 	writeFailed := false
-	writeChunk := func(delta string, finish string) {
+	writeDelta := func(delta map[string]any, finish any) {
 		payload := map[string]any{
 			"id":      "chatcmpl-" + requestID,
 			"object":  "chat.completion.chunk",
@@ -255,12 +299,9 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, prep *P
 			"model":   prep.Input.Model,
 			"choices": []map[string]any{{
 				"index":         0,
-				"delta":         map[string]any{"content": delta},
-				"finish_reason": nil,
+				"delta":         delta,
+				"finish_reason": finish,
 			}},
-		}
-		if finish != "" {
-			payload["choices"] = []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": defaultFinish(finish)}}
 		}
 		buf, _ := json.Marshal(payload)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", buf); err != nil {
@@ -271,6 +312,20 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, prep *P
 			flusher.Flush()
 		}
 	}
+	writeChunk := func(delta string, finish string) {
+		d := map[string]any{}
+		if delta != "" {
+			d["content"] = delta
+		}
+		var f any
+		if finish != "" {
+			f = defaultFinish(finish)
+		}
+		writeDelta(d, f)
+	}
+	// answer accumulates the visible text so chat-knowledge skills can capture
+	// the exchange after the stream completes.
+	var answer strings.Builder
 
 	for ev := range outcome.Stream {
 		// Stop draining the upstream as soon as the client goes away so we do
@@ -293,11 +348,29 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, prep *P
 			g.finishStream(prep, outcome, requestID, started, inTok, outTok, "error", "stream interrupted")
 			return "error"
 		}
+		if ev.Reasoning != "" {
+			if firstChunk {
+				firstChunk = false
+			}
+			writeDelta(map[string]any{"reasoning_content": ev.Reasoning}, nil)
+			if writeFailed {
+				g.finishStream(prep, outcome, requestID, started, inTok, outTok, "error", "client write failed")
+				return "error"
+			}
+		}
 		if ev.Delta != "" {
 			if firstChunk {
 				firstChunk = false
 			}
+			answer.WriteString(ev.Delta)
 			writeChunk(ev.Delta, "")
+			if writeFailed {
+				g.finishStream(prep, outcome, requestID, started, inTok, outTok, "error", "client write failed")
+				return "error"
+			}
+		}
+		if len(ev.ToolCalls) > 0 {
+			writeDelta(map[string]any{"tool_calls": json.RawMessage(ev.ToolCalls)}, "tool_calls")
 			if writeFailed {
 				g.finishStream(prep, outcome, requestID, started, inTok, outTok, "error", "client write failed")
 				return "error"
@@ -309,7 +382,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, prep *P
 		if ev.OutputTok > 0 {
 			outTok = ev.OutputTok
 		}
-		if ev.Finish != "" {
+		if ev.Finish != "" && len(ev.ToolCalls) == 0 {
 			writeChunk("", ev.Finish)
 			if writeFailed {
 				g.finishStream(prep, outcome, requestID, started, inTok, outTok, "error", "client write failed")
@@ -321,6 +394,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, prep *P
 	if flusher != nil {
 		flusher.Flush()
 	}
+	go g.captureSkills(prep, answer.String())
 	g.finishStream(prep, outcome, requestID, started, inTok, outTok, "ok", "")
 	return "ok"
 }
@@ -340,11 +414,15 @@ func (g *Gateway) finishStream(prep *PreparedRequest, outcome *Outcome, requestI
 		ModelID: idOf(outcome.Model), ProviderID: idOfProvider(outcome.Provider), APIKeyID: prep.APIKey.ID,
 		IP: prep.IP, DeviceID: prep.DeviceID, Status: status, HTTPStatus: http.StatusOK,
 		LatencyMS: time.Since(started).Milliseconds(), InTokens: inTok, OutTokens: outTok,
-		FallbackFrom: fallbackFrom, ErrorCode: errMsg, Trace: outcome.Trace,
+		FallbackFrom: fallbackFrom, ErrorCode: errMsg, Trace: prep.traceWith(outcome.Trace),
 	}
 	_ = g.db.InsertRequestLog(entry)
-	_ = g.db.AddUsage(time.Now().Format("2006-01-02"), prep.Route.ID, idOfProvider(outcome.Provider), prep.APIKey.ID,
-		status, inTok, outTok, outcome.Fallback, g.costOf(outcome.Model, inTok, outTok))
+	date := time.Now().Format("2006-01-02")
+	cost := g.costOf(outcome.Model, inTok, outTok)
+	_ = g.db.AddUsage(date, prep.Route.ID, idOfProvider(outcome.Provider), prep.APIKey.ID,
+		status, inTok, outTok, outcome.Fallback, cost)
+	_ = g.db.AddModelUsage(date, idOfProvider(outcome.Provider), idOf(outcome.Model),
+		status, inTok, outTok, cost)
 }
 
 func (g *Gateway) logActivity(requestID string, started time.Time, r *http.Request, auth *AuthResult, route *model.Route, prov *model.Provider,
@@ -374,8 +452,12 @@ func (g *Gateway) logActivity(requestID string, started time.Time, r *http.Reque
 }
 
 func (g *Gateway) recordUsage(route *model.Route, prov *model.Provider, key *model.APIKey, status string, usage provider.Usage, fallback bool, mdl *model.Model) {
-	_ = g.db.AddUsage(time.Now().Format("2006-01-02"), route.ID, idOfProvider(prov), key.ID, status,
-		usage.InputTokens, usage.OutputTokens, fallback, g.costOf(mdl, usage.InputTokens, usage.OutputTokens))
+	date := time.Now().Format("2006-01-02")
+	cost := g.costOf(mdl, usage.InputTokens, usage.OutputTokens)
+	_ = g.db.AddUsage(date, route.ID, idOfProvider(prov), key.ID, status,
+		usage.InputTokens, usage.OutputTokens, fallback, cost)
+	_ = g.db.AddModelUsage(date, idOfProvider(prov), idOf(mdl), status,
+		usage.InputTokens, usage.OutputTokens, cost)
 }
 
 // costOf computes an estimated cost using per-1M-token prices when available.
@@ -401,6 +483,8 @@ func statusFor(e *provider.Error) int {
 		return http.StatusTooManyRequests
 	case provider.CatTimeOut:
 		return http.StatusGatewayTimeout
+	case provider.CatBilling:
+		return http.StatusPaymentRequired
 	case provider.CatAuth:
 		return http.StatusBadGateway
 	case provider.CatInvalidRequest:

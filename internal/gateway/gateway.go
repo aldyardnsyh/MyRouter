@@ -33,8 +33,11 @@ type Gateway struct {
 	log      *logx.Logger
 	version  string
 	live     *liveTracker
+	breaker  *breaker
 
 	identityMu sync.RWMutex
+	rrMu       sync.Mutex
+	rr         map[string]uint64
 }
 
 // Options configures a Gateway.
@@ -60,7 +63,7 @@ func New(o Options) *Gateway {
 	return &Gateway{
 		db: o.DB, registry: o.Registry, box: o.Box, guard: o.Guard,
 		identity: o.Identity, client: o.Client, log: o.Log, version: o.Version,
-		live: newLiveTracker(),
+		live: newLiveTracker(), breaker: newBreaker(), rr: map[string]uint64{},
 	}
 }
 
@@ -93,12 +96,24 @@ func (g *Gateway) ListModels(ctx context.Context) ([]OpenAIModel, error) {
 	}
 	out := make([]OpenAIModel, 0, len(routes))
 	for _, r := range routes {
-		if !r.Enabled {
+		if !r.Enabled || !routeHasUsableTarget(r) {
 			continue
 		}
 		out = append(out, OpenAIModel{ID: r.Alias, Object: "model", Created: r.CreatedAt, OwnedBy: "myrouter"})
 	}
 	return out, nil
+}
+
+// routeHasUsableTarget reports whether any target can serve. The store folds
+// provider.enabled and model.available into Target.Available, so a route that
+// only points at disabled providers is not advertised to clients.
+func routeHasUsableTarget(r model.Route) bool {
+	for _, t := range r.Targets {
+		if t.Available {
+			return true
+		}
+	}
+	return false
 }
 
 // AuthResult is the outcome of API-key authentication.
@@ -147,7 +162,11 @@ type ChatInput struct {
 	Temperature *float64
 	TopP        *float64
 	Stream      bool
+	Headers     http.Header
 	Extra       map[string]any
+	// SystemExtra is server-side context assembled by skills (retrieval, notes,
+	// vision). Adapters merge it after the client's own system prompt.
+	SystemExtra string
 }
 
 // ParseChat decodes an OpenAI chat completions body.
@@ -176,7 +195,7 @@ func ParseChat(body []byte) (*ChatInput, error) {
 	}
 	var generic map[string]any
 	if err := json.Unmarshal(body, &generic); err == nil {
-		for _, k := range []string{"stop", "presence_penalty", "frequency_penalty", "seed", "response_format", "user", "top_k"} {
+		for _, k := range []string{"stop", "presence_penalty", "frequency_penalty", "seed", "response_format", "user", "top_k", "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort", "reasoning"} {
 			if v, ok := generic[k]; ok {
 				in.Extra[k] = v
 			}
@@ -217,6 +236,11 @@ type PreparedRequest struct {
 	UserAgent string
 	EstTokens int
 	Started   time.Time
+
+	// Skills state for this request.
+	SkillTrace    string
+	CaptureSkills []model.Skill
+	CaptureUser   string
 }
 
 // GuardRequest builds the Guard evaluation request.
@@ -264,6 +288,11 @@ func (g *Gateway) decryptCredential(providerID string) (string, error) {
 	return g.box.Decrypt(ct, nonce)
 }
 
+// maxTargetAttempts bounds how many real upstream calls one request may make
+// when a route contains a large account pool. Cheap skips (disabled provider,
+// cooldown) do not count; only calls that reach a provider do.
+const maxTargetAttempts = 12
+
 // execute attempts the primary target then each fallback in order. Fallback is
 // only triggered for categories listed in the route's fallback_on set
 // (default: 429, timeout, 5xx, network).
@@ -288,11 +317,32 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	totalDeadline := prep.Started.Add(timeout + time.Duration(len(route.Targets))*timeout/2)
+	budget := len(route.Targets)
+	if budget > maxTargetAttempts {
+		budget = maxTargetAttempts
+	}
+	totalDeadline := prep.Started.Add(timeout + time.Duration(budget)*timeout/2)
+
+	// round_robin rotates the starting account per request so a pool of
+	// accounts shares load. priority keeps the declared order and only moves
+	// to the next target when the current one fails.
+	targets := route.Targets
+	if route.Strategy == "round_robin" && len(targets) > 1 {
+		start := g.nextRR(route.ID, len(targets))
+		ordered := make([]model.RouteTarget, 0, len(targets))
+		ordered = append(ordered, targets[start:]...)
+		ordered = append(ordered, targets[:start]...)
+		targets = ordered
+	}
 
 	out := &Outcome{Trace: []model.TraceStep{}, Provider: &model.Provider{}}
+	var lastCooldown *provider.Error
 	attempt := 0
-	for idx, t := range route.Targets {
+	networkAttempts := 0
+	for idx, t := range targets {
+		if networkAttempts >= maxTargetAttempts {
+			break
+		}
 		mdl, err := g.db.ModelByID(t.ModelID)
 		if err != nil {
 			continue
@@ -306,9 +356,25 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 			attempt++
 			continue
 		}
+		if allowed, cooldownCat := g.breaker.allow(prov.ID); !allowed {
+			lastCooldown = &provider.Error{
+				Category: cooldownCat,
+				Message:  "provider cooling down after " + string(cooldownCat),
+			}
+			out.Trace = append(out.Trace, model.TraceStep{
+				Attempt: attempt + 1, Target: mdl.ModelID, Provider: prov.Name, Outcome: "skipped",
+				Category: "cooldown", Message: lastCooldown.Message,
+			})
+			attempt++
+			continue
+		}
 
 		var lastErr *provider.Error
 		for r := 0; r <= retries; r++ {
+			if networkAttempts >= maxTargetAttempts {
+				break
+			}
+			networkAttempts++
 			attempt++
 			attemptCtx, cancel := context.WithDeadline(ctx, minTime(totalDeadline, time.Now().Add(timeout)))
 			start := time.Now()
@@ -337,6 +403,7 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 				out.Fallback = idx > 0
 				out.Latency = latency
 				out.Err = nil // a later target succeeded; clear earlier failures
+				g.breaker.success(prov.ID)
 				return out, nil
 			}
 			cancel()
@@ -347,12 +414,18 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 				Category: string(perr.Category), StatusCode: perr.StatusCode,
 				LatencyMS: latency.Milliseconds(), Message: perr.Message,
 			})
+			g.breaker.fail(prov.ID, perr.Category)
 			if !provider.FallbackEligible(perr.Category) || !eligible[string(perr.Category)] {
 				out.Err = perr
 				out.Model = mdl
 				out.Provider = prov
 				out.Latency = latency
 				return out, nil
+			}
+			// A billing block will not clear inside a retry window; move to the
+			// next account immediately instead of retrying the same one.
+			if perr.Category == provider.CatBilling {
+				break
 			}
 			// Bounded exponential backoff with jitter before retrying.
 			if r < retries {
@@ -371,7 +444,11 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 		}
 	}
 	if out.Err == nil {
-		out.Err = &provider.Error{Category: provider.CatUnknown, Message: "all route targets failed"}
+		if lastCooldown != nil {
+			out.Err = lastCooldown
+		} else {
+			out.Err = &provider.Error{Category: provider.CatUnknown, Message: "all route targets failed"}
+		}
 	}
 	return out, nil
 }
@@ -421,7 +498,8 @@ func (g *Gateway) attemptOnce(ctx context.Context, prep *PreparedRequest, mdl *m
 	req := provider.ChatRequest{
 		Model: mdl.ModelID, Messages: prep.Input.Messages, MaxTokens: prep.Input.MaxTokens,
 		Temperature: prep.Input.Temperature, TopP: prep.Input.TopP, Stream: prep.Input.Stream,
-		System: prep.Input.System, Extra: prep.Input.Extra,
+		System: prep.Input.System, SystemExtra: prep.Input.SystemExtra,
+		Headers: prep.Input.Headers, Extra: prep.Input.Extra,
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = 1024
@@ -456,7 +534,7 @@ func minTime(a, b time.Time) time.Time {
 
 func fallbackSet(csv string) map[string]bool {
 	if strings.TrimSpace(csv) == "" {
-		csv = "rate_limit,timeout,upstream_5xx,network"
+		csv = "rate_limit,timeout,upstream_5xx,network,billing"
 	}
 	out := map[string]bool{}
 	for _, p := range store.SplitCSV(csv) {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { classNames } from '../../lib/format';
 import { Button } from './Button';
 
@@ -170,17 +170,29 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
   );
 }
 
+export type ConfirmTone = 'danger' | 'warning' | 'info' | 'success';
+
 export interface ConfirmDialogProps {
   open: boolean;
   onClose: () => void;
   onConfirm: () => void;
   title: string;
   message: string;
+  /** Extra context, e.g. the aliases that will be affected. */
+  details?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   loading?: boolean;
   destructive?: boolean;
+  tone?: ConfirmTone;
 }
+
+const confirmTones: Record<ConfirmTone, { icon: ReactNode; wrap: string }> = {
+  danger: { icon: <XCircle size={18} />, wrap: 'bg-danger-soft text-danger' },
+  warning: { icon: <AlertTriangle size={18} />, wrap: 'bg-warning-soft text-warning' },
+  info: { icon: <Info size={18} />, wrap: 'bg-info-soft text-info' },
+  success: { icon: <CheckCircle2 size={18} />, wrap: 'bg-success-soft text-success' },
+};
 
 export function ConfirmDialog({
   open,
@@ -188,11 +200,17 @@ export function ConfirmDialog({
   onConfirm,
   title,
   message,
+  details,
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   loading,
   destructive = true,
+  tone,
 }: ConfirmDialogProps) {
+  // Deletion is destructive unless the caller says otherwise; other confirms
+  // stay informative so the dialog is not red just because it asks a question.
+  const resolvedTone: ConfirmTone = tone ?? (destructive ? 'danger' : 'info');
+  const style = confirmTones[resolvedTone];
   return (
     <Modal
       open={open}
@@ -210,7 +228,15 @@ export function ConfirmDialog({
         </>
       }
     >
-      <p className="text-[13px] text-muted leading-relaxed">{message}</p>
+      <div className="flex items-start gap-3">
+        <span className={classNames('flex h-9 w-9 shrink-0 items-center justify-center rounded-full', style.wrap)}>
+          {style.icon}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] leading-relaxed text-muted">{message}</p>
+          {details && <div className="mt-2.5">{details}</div>}
+        </div>
+      </div>
     </Modal>
   );
 }

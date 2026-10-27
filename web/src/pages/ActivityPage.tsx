@@ -8,7 +8,7 @@ import { Drawer } from '../components/ui/Overlay';
 import { Field, Input, Select } from '../components/ui/Field';
 import { Callout } from '../components/ui/Layout';
 import { admin, ApiError } from '../lib/api';
-import type { ActivityEntry, Metrics, Provider, Route, UsageRow } from '../lib/types';
+import type { ActivityEntry, Metrics, Provider, Route, UsageModelRow, UsageRow } from '../lib/types';
 import {
   activityBadge,
   formatCompact,
@@ -16,6 +16,7 @@ import {
   formatDateTime,
   formatLatency,
   formatNumber,
+  formatPrice,
 } from '../lib/format';
 
 const PAGE_SIZE = 25;
@@ -327,6 +328,14 @@ function UsageTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Cost breakdown has its own day range so switching it does not re-query the
+  // aggregate table, and vice versa.
+  const [costDays, setCostDays] = useState(7);
+  const [providerCostRows, setProviderCostRows] = useState<UsageRow[]>([]);
+  const [modelRows, setModelRows] = useState<UsageModelRow[]>([]);
+  const [costLoading, setCostLoading] = useState(true);
+  const [costError, setCostError] = useState<string | null>(null);
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
@@ -341,15 +350,51 @@ function UsageTab() {
     }
   }, [groupBy, days]);
 
+  // The rollup reuses the provider-grouped aggregate rows; the model table
+  // comes from /usage/models with catalog prices attached.
+  const loadCost = useCallback(async () => {
+    setCostLoading(true);
+    try {
+      const [providerRes, modelsRes] = await Promise.all([
+        admin.usage('provider', costDays),
+        admin.usageModels(costDays),
+      ]);
+      setProviderCostRows(providerRes.data ?? []);
+      setModelRows(modelsRes.data ?? []);
+      setCostError(null);
+    } catch (err) {
+      setCostError(err instanceof ApiError ? err.message : 'Failed to load cost breakdown');
+    } finally {
+      setCostLoading(false);
+    }
+  }, [costDays]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void loadCost();
+  }, [loadCost]);
 
   const totalCost = useMemo(() => {
     const withCost = rows.filter((r) => r.est_cost !== null);
     if (withCost.length === 0) return null;
     return withCost.reduce((acc, r) => acc + (r.est_cost ?? 0), 0);
   }, [rows]);
+
+  // Priced rows first, most expensive first; unpriced rows stay visible at the
+  // bottom so their tokens still count.
+  const sortByCost = <T extends { est_cost: number | null }>(list: T[]): T[] =>
+    [...list].sort((a, b) => {
+      if (a.est_cost === null && b.est_cost === null) return 0;
+      if (a.est_cost === null) return 1;
+      if (b.est_cost === null) return -1;
+      return b.est_cost - a.est_cost;
+    });
+
+  const sortedProviders = useMemo(() => sortByCost(providerCostRows), [providerCostRows]);
+  const sortedModels = useMemo(() => sortByCost(modelRows), [modelRows]);
 
   const columns: Column<UsageRow>[] = [
     { key: 'label', header: groupBy === 'day' ? 'Date' : groupBy === 'provider' ? 'Provider' : groupBy === 'key' ? 'API key' : 'Route', render: (r) => <span className="font-medium text-text">{r.label}</span> },
@@ -364,6 +409,58 @@ function UsageTab() {
       header: 'Est. cost',
       align: 'right',
       render: (r) => (r.est_cost === null ? <span className="text-[11.5px] italic text-muted">Cost unavailable</span> : <span className="tabular">{formatCost(r.est_cost)}</span>),
+    },
+  ];
+
+  const modelColumns: Column<UsageModelRow>[] = [
+    {
+      key: 'provider',
+      header: 'Provider',
+      render: (r) => <span className="text-text">{r.provider_name || r.provider_id}</span>,
+    },
+    {
+      key: 'model',
+      header: 'Model',
+      render: (r) => (
+        <div className="flex flex-col">
+          <span className="font-mono text-[12px] text-text">{r.model_name || r.model_id}</span>
+          {r.model_name && r.model_name !== r.model_id && (
+            <span className="truncate font-mono text-[10.5px] text-muted">{r.model_id}</span>
+          )}
+        </div>
+      ),
+    },
+    { key: 'requests', header: 'Requests', align: 'right', render: (r) => <span className="tabular">{formatNumber(r.requests)}</span> },
+    {
+      key: 'tokens',
+      header: 'Tokens',
+      align: 'right',
+      render: (r) => (
+        <span className="font-mono text-[11.5px] text-muted">
+          {formatCompact(r.in_tokens)} in / {formatCompact(r.out_tokens)} out
+        </span>
+      ),
+    },
+    {
+      key: 'cost',
+      header: 'Est. cost',
+      align: 'right',
+      render: (r) =>
+        r.est_cost === null ? (
+          <span className="text-[11.5px] italic text-muted">Cost unavailable</span>
+        ) : (
+          <span className="tabular">{formatCost(r.est_cost)}</span>
+        ),
+    },
+    {
+      key: 'price',
+      header: 'Price in / out',
+      align: 'right',
+      render: (r) => (
+        <span className="font-mono text-[11px] text-muted">
+          {formatPrice(r.price_in) ?? '-'} / {formatPrice(r.price_out) ?? '-'}
+        </span>
+      ),
     },
   ];
 
@@ -406,6 +503,76 @@ function UsageTab() {
           onRetry={() => void load()}
           empty={<p className="py-10 text-center text-[12.5px] text-muted">No usage recorded for this period.</p>}
         />
+      </Card>
+
+      <Card padded={false}>
+        <div className="flex flex-col gap-2 border-b border-border p-3 sm:flex-row sm:items-center sm:justify-between">
+          <CardHeader
+            title="Estimated cost by model"
+            description="Official catalog prices applied to recorded token usage."
+          />
+          <Select
+            value={String(costDays)}
+            onChange={(e) => setCostDays(Number(e.target.value))}
+            className="w-32"
+          >
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+          </Select>
+        </div>
+
+        <div className="border-b border-border px-4 py-3">
+          <p className="mb-2 text-[11px] uppercase tracking-wide text-muted">Provider rollup</p>
+          {costLoading && providerCostRows.length === 0 ? (
+            <p className="py-2 text-[12px] text-muted">Loading provider totals...</p>
+          ) : sortedProviders.length === 0 ? (
+            <p className="py-2 text-[12px] text-muted">No provider usage recorded for this period.</p>
+          ) : (
+            <table className="w-full">
+              <thead>
+                <tr className="text-[11px] uppercase tracking-wide text-muted">
+                  <th className="py-1.5 text-left font-medium">Provider</th>
+                  <th className="py-1.5 text-right font-medium">Requests</th>
+                  <th className="py-1.5 text-right font-medium">Tokens</th>
+                  <th className="py-1.5 text-right font-medium">Est. cost</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {sortedProviders.map((row) => (
+                  <tr key={row.key} className="text-[12.5px]">
+                    <td className="py-1.5 text-text">{row.label}</td>
+                    <td className="py-1.5 text-right tabular">{formatNumber(row.requests)}</td>
+                    <td className="py-1.5 text-right font-mono text-[11.5px] text-muted">
+                      {formatCompact(row.in_tokens)} in / {formatCompact(row.out_tokens)} out
+                    </td>
+                    <td className="py-1.5 text-right">
+                      {row.est_cost === null ? (
+                        <span className="text-[11.5px] italic text-muted">Cost unavailable</span>
+                      ) : (
+                        <span className="tabular">{formatCost(row.est_cost)}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <DataTable
+          columns={modelColumns}
+          rows={sortedModels}
+          rowKey={(r) => `${r.provider_id}:${r.model_id}`}
+          loading={costLoading}
+          error={costError}
+          onRetry={() => void loadCost()}
+          empty={<p className="py-10 text-center text-[12.5px] text-muted">No model usage recorded for this period.</p>}
+        />
+
+        <p className="border-t border-border px-4 py-2.5 text-[11px] text-muted">
+          Estimated from official model prices (may differ slightly from provider invoices).
+        </p>
       </Card>
     </div>
   );

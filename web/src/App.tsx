@@ -7,6 +7,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { ModelsPage, ProviderDetailPage } from './pages/ModelsPage';
 import { RoutesPage } from './pages/RoutesPage';
+import { SkillsPage } from './pages/SkillsPage';
 import { ApiKeysPage } from './pages/ApiKeysPage';
 import { GuardPage } from './pages/GuardPage';
 import { ActivityPage } from './pages/ActivityPage';
@@ -39,6 +40,7 @@ export function App() {
         <Route path="providers/:id" element={<ProviderDetailPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="routes" element={<RoutesPage />} />
+        <Route path="skills" element={<SkillsPage />} />
         <Route path="api-keys" element={<ApiKeysPage />} />
         <Route path="guard" element={<GuardPage />} />
         <Route path="activity" element={<ActivityPage />} />

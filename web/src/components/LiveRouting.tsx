@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { LiveRequest, LiveSnapshot, Provider } from '../lib/types';
 import { classNames } from '../lib/format';
 
@@ -10,6 +10,20 @@ interface Props {
 const W = 760;
 const H = 300;
 const CENTER = { x: 380, y: 150 };
+
+// Motion is gated on the user's system preference. SMIL (animateMotion) does
+// not answer to the CSS reduced-motion rule, so it needs an explicit check.
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const sync = () => setReduced(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+  return reduced;
+}
 
 function nodePositions(count: number) {
   // Split providers into a left and right column so edges read as a fan-out
@@ -42,10 +56,39 @@ function statusColor(status: string) {
   }
 }
 
+function edgePath(pos: { x: number; y: number }) {
+  return `M ${CENTER.x} ${CENTER.y} C ${CENTER.x + (pos.x - CENTER.x) * 0.45} ${CENTER.y}, ${
+    CENTER.x + (pos.x - CENTER.x) * 0.55
+  } ${pos.y}, ${pos.x} ${pos.y}`;
+}
+
+// Motion purpose: a dashed flow on an edge that carries a live request shows
+// direction of travel; a single packet per in-flight request shows load. Both
+// only exist while traffic exists, so the map is still when idle.
+const liveStyle = `
+@keyframes mrl-flow { to { stroke-dashoffset: -12; } }
+@keyframes mrl-pop { 0% { transform: scale(0.55); opacity: 0; } 65% { transform: scale(1.12); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+.mrl-edge-hot { stroke-dasharray: 3 9; animation: mrl-flow 900ms linear infinite; }
+.mrl-count { transform-box: fill-box; transform-origin: center; animation: mrl-pop 260ms cubic-bezier(0.22, 1, 0.36, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .mrl-edge-hot { animation: none; stroke-dasharray: none; }
+  .mrl-count { animation: none; }
+}`;
+
 export function LiveRoutingCard({ providers, live }: Props) {
   const active = live?.active ?? [];
   const recent = live?.recent ?? [];
-  const nodes = useMemo(() => providers.slice(0, 6), [providers]);
+  const reducedMotion = usePrefersReducedMotion();
+
+  // Disabled providers never carry traffic, so drawing them on the map only
+  // adds noise. Keep the count visible in the header so the omission is
+  // explained rather than looking like data loss.
+  const { enabledProviders, hiddenCount } = useMemo(() => {
+    const enabled = providers.filter((p) => p.enabled);
+    return { enabledProviders: enabled, hiddenCount: providers.length - enabled.length };
+  }, [providers]);
+
+  const nodes = useMemo(() => enabledProviders.slice(0, 6), [enabledProviders]);
   const positions = useMemo(() => nodePositions(nodes.length), [nodes.length]);
   const byId = useMemo(() => new Map(nodes.map((p, i) => [p.id, { provider: p, pos: positions[i] }])), [nodes, positions]);
 
@@ -62,14 +105,12 @@ export function LiveRoutingCard({ providers, live }: Props) {
   const packets = active.slice(0, 8).flatMap((req) => {
     const target = byId.get(req.provider_id);
     if (!target) return [];
-    const path = `M ${CENTER.x} ${CENTER.y} C ${CENTER.x + (target.pos.x - CENTER.x) * 0.45} ${CENTER.y}, ${
-      CENTER.x + (target.pos.x - CENTER.x) * 0.55
-    } ${target.pos.y}, ${target.pos.x} ${target.pos.y}`;
-    return [{ req, path }];
+    return [{ req, path: edgePath(target.pos) }];
   });
 
   return (
     <div className="overflow-hidden rounded-card border border-border bg-bg">
+      <style>{liveStyle}</style>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div>
           <div className="flex items-center gap-2">
@@ -81,6 +122,14 @@ export function LiveRoutingCard({ providers, live }: Props) {
             <span className="rounded-pill border border-border bg-surface px-2 py-0.5 font-mono text-[10.5px] text-muted">
               {active.length ? `${active.length} in flight` : 'idle'}
             </span>
+            {hiddenCount > 0 && (
+              <span
+                className="rounded-pill border border-border bg-surface px-2 py-0.5 text-[10.5px] text-muted"
+                title="Provider nonaktif tidak menerima trafik, jadi tidak digambar di peta."
+              >
+                {hiddenCount} disabled disembunyikan
+              </span>
+            )}
           </div>
           <p className="mt-0.5 text-[11.5px] text-muted">
             Setiap paket = satu request yang sedang memakai API key provider.
@@ -94,7 +143,7 @@ export function LiveRoutingCard({ providers, live }: Props) {
       </div>
 
       <div className="relative bg-surface/40">
-        <svg viewBox={`0 0 ${W} ${H}`} className="h-[260px] w-full sm:h-[300px]" role="img" aria-label="Peta routing provider">
+        <svg viewBox={`0 0 ${W} ${H}`} className="h-[260px] w-full sm:h-[300px]" role="img" aria-label="Peta routing provider aktif">
           <defs>
             <pattern id="live-dots" width="18" height="18" patternUnits="userSpaceOnUse">
               <circle cx="1" cy="1" r="1" fill="rgb(var(--c-border))" opacity="0.55" />
@@ -109,16 +158,15 @@ export function LiveRoutingCard({ providers, live }: Props) {
             return (
               <g key={p.id}>
                 <path
-                  d={`M ${CENTER.x} ${CENTER.y} C ${CENTER.x + (pos.x - CENTER.x) * 0.45} ${CENTER.y}, ${
-                    CENTER.x + (pos.x - CENTER.x) * 0.55
-                  } ${pos.y}, ${pos.x} ${pos.y}`}
+                  d={edgePath(pos)}
                   fill="none"
                   stroke={hot ? 'rgb(var(--c-accent))' : 'rgb(var(--c-border))'}
                   strokeWidth={hot ? 1.8 : 1.2}
                   strokeDasharray={hot ? undefined : '4 4'}
                   opacity={hot ? 0.85 : 0.7}
+                  className={hot ? 'mrl-edge-hot' : undefined}
                 />
-                {hot && (
+                {hot && !reducedMotion && (
                   <circle cx={pos.x} cy={pos.y} r={26} fill="none" stroke="rgb(var(--c-accent))" strokeWidth="1.2" opacity="0.5">
                     <animate attributeName="r" values="24;34;24" dur="2s" repeatCount="indefinite" />
                     <animate attributeName="opacity" values="0.45;0;0.45" dur="2s" repeatCount="indefinite" />
@@ -131,14 +179,16 @@ export function LiveRoutingCard({ providers, live }: Props) {
                     {shortName(p.name)}
                   </text>
                   <text x="14" y="36" fontSize="9.5" fill="rgb(var(--c-muted))">
-                    {p.type} · {p.enabled ? 'enabled' : 'disabled'}
+                    {p.type} · {p.status.replace('_', ' ')}
                   </text>
                   {count > 0 && (
                     <g transform="translate(140, 10)">
-                      <circle r="9" fill="rgb(var(--c-accent))" />
-                      <text y="3.2" textAnchor="middle" fontSize="9.5" fontWeight="700" fill="#fff">
-                        {count}
-                      </text>
+                      <g className="mrl-count">
+                        <circle r="9" fill="rgb(var(--c-accent))" />
+                        <text y="3.2" textAnchor="middle" fontSize="9.5" fontWeight="700" fill="#fff">
+                          {count}
+                        </text>
+                      </g>
                     </g>
                   )}
                 </g>
@@ -147,10 +197,23 @@ export function LiveRoutingCard({ providers, live }: Props) {
           })}
 
           {packets.map(({ req, path }) => (
-            <circle key={req.request_id} r="4" fill={statusColor(req.status)} opacity="0.95">
-              <animateMotion dur="1.5s" repeatCount="indefinite" path={path} rotate="auto" />
-              <animate attributeName="opacity" values="0.25;1;0.25" dur="1.5s" repeatCount="indefinite" />
-            </circle>
+            <g key={req.request_id}>
+              {reducedMotion ? (
+                <circle cx={CENTER.x} cy={CENTER.y} r="3.5" fill={statusColor(req.status)} opacity="0.8" />
+              ) : (
+                <>
+                  {/* Trailing dot starts later on the same path, so the pair
+                      reads as a packet with a tail instead of a lone blip. */}
+                  <circle r="2.4" fill={statusColor(req.status)} opacity="0.35">
+                    <animateMotion dur="1.5s" begin="0.18s" repeatCount="indefinite" path={path} rotate="auto" />
+                  </circle>
+                  <circle r="4" fill={statusColor(req.status)} opacity="0.95">
+                    <animateMotion dur="1.5s" repeatCount="indefinite" path={path} rotate="auto" />
+                    <animate attributeName="opacity" values="0.25;1;0.25" dur="1.5s" repeatCount="indefinite" />
+                  </circle>
+                </>
+              )}
+            </g>
           ))}
 
           {/* Router node */}
@@ -166,7 +229,9 @@ export function LiveRoutingCard({ providers, live }: Props) {
 
           {nodes.length === 0 && (
             <text x={W / 2} y={H - 26} textAnchor="middle" fontSize="11.5" fill="rgb(var(--c-muted))">
-              Belum ada provider — tambahkan satu untuk melihat topologi.
+              {providers.length === 0
+                ? 'Belum ada provider. Tambahkan satu untuk melihat topologi.'
+                : 'Semua provider dinonaktifkan. Aktifkan satu untuk melihat topologi.'}
             </text>
           )}
         </svg>

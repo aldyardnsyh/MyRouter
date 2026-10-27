@@ -17,8 +17,9 @@ import (
 // AllowPrivate is on so base URLs used by the tests need no DNS resolution and
 // the tests never touch the network; metadata hosts stay blocked regardless.
 type providerHarness struct {
-	db *store.DB
-	h  http.Handler
+	db  *store.DB
+	srv *Server
+	h   http.Handler
 }
 
 func newProviderHarness(t *testing.T) *providerHarness {
@@ -44,7 +45,7 @@ func newProviderHarness(t *testing.T) *providerHarness {
 		t.Fatal(err)
 	}
 	s := New(Deps{DB: db, Box: box, Config: ServerConfig{Version: "test", AllowPrivate: true}})
-	return &providerHarness{db: db, h: s.Handler()}
+	return &providerHarness{db: db, srv: s, h: s.Handler()}
 }
 
 // patch issues an authenticated PATCH with the session cookie and CSRF header.

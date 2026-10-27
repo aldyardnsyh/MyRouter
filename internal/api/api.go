@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/myrouter/myrouter/internal/gateway"
 	"github.com/myrouter/myrouter/internal/guard"
 	"github.com/myrouter/myrouter/internal/logx"
+	"github.com/myrouter/myrouter/internal/modelspec"
 	"github.com/myrouter/myrouter/internal/provider"
 	"github.com/myrouter/myrouter/internal/secret"
+	"github.com/myrouter/myrouter/internal/skillimport"
 	"github.com/myrouter/myrouter/internal/store"
 )
 
@@ -31,6 +34,12 @@ type Server struct {
 	version      string
 	allowPrivate bool
 	cfg          ServerConfig
+
+	// catalog supplies official model metadata (context window, prices,
+	// capabilities) for discovered models. Nil is allowed (tests, offline).
+	catalog *modelspec.Catalog
+	// skillFetcher resolves skills.sh links into SKILL.md content.
+	skillFetcher *skillimport.Fetcher
 
 	// In-memory failed-attempt counters for the sensitive endpoints. They live
 	// for the process lifetime and are intentionally not persisted.
@@ -67,6 +76,7 @@ type Deps struct {
 	Identity *guard.Identity
 	Log      *logx.Logger
 	Config   ServerConfig
+	Catalog  *modelspec.Catalog
 }
 
 // New builds the admin API server.
@@ -74,10 +84,17 @@ func New(d Deps) *Server {
 	if d.Log == nil {
 		d.Log = logx.Default()
 	}
+	if d.Registry == nil {
+		// Tests and minimal embeddings may omit the registry; keep provider
+		// probing functional instead of panicking on a nil adapter lookup.
+		d.Registry = provider.NewRegistry(&http.Client{Timeout: 10 * time.Second})
+	}
 	s := &Server{
 		db: d.DB, box: d.Box, registry: d.Registry, guard: d.Guard, gateway: d.Gateway,
 		identity: d.Identity, log: d.Log, version: d.Config.Version,
 		allowPrivate: d.Config.AllowPrivate, cfg: d.Config,
+		catalog:          d.Catalog,
+		skillFetcher:     skillimport.NewFetcher(),
 		ipLimiter:        newAttemptLimiter(maxFailuresPerIP, attemptWindow),
 		userLimiter:      newAttemptLimiter(maxFailuresPerUser, attemptWindow),
 		sensitiveLimiter: newAttemptLimiter(maxFailuresPerIP, attemptWindow),
@@ -157,8 +174,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/routes", s.withAuth(s.handleListRoutes))
 	mux.HandleFunc("POST /admin/routes", s.withAuth(s.handleCreateRoute))
 	mux.HandleFunc("POST /admin/routes/auto", s.withAuth(s.handleAutoRoutes))
+	mux.HandleFunc("POST /admin/routes/bulk", s.withAuth(s.handleBulkRoutes))
 	mux.HandleFunc("PATCH /admin/routes/{id}", s.withAuth(s.handleUpdateRoute))
 	mux.HandleFunc("DELETE /admin/routes/{id}", s.withAuth(s.handleDeleteRoute))
+
+	// Skills: server-side context injected into gateway requests.
+	mux.HandleFunc("GET /admin/skills", s.withAuth(s.handleListSkills))
+	mux.HandleFunc("POST /admin/skills", s.withAuth(s.handleCreateSkill))
+	mux.HandleFunc("POST /admin/skills/import/preview", s.withAuth(s.handlePreviewSkillImport))
+	mux.HandleFunc("POST /admin/skills/import", s.withAuth(s.handleImportSkill))
+	mux.HandleFunc("GET /admin/skills/{id}", s.withAuth(s.handleGetSkill))
+	mux.HandleFunc("PATCH /admin/skills/{id}", s.withAuth(s.handleUpdateSkill))
+	mux.HandleFunc("DELETE /admin/skills/{id}", s.withAuth(s.handleDeleteSkill))
+	mux.HandleFunc("PUT /admin/skills/{id}/bindings", s.withAuth(s.handleSetSkillBindings))
+	mux.HandleFunc("POST /admin/skills/{id}/sync", s.withAuth(s.handleSyncSkill))
+	mux.HandleFunc("GET /admin/skills/{id}/items", s.withAuth(s.handleListSkillItems))
+	mux.HandleFunc("POST /admin/skills/{id}/items", s.withAuth(s.handleCreateSkillItem))
+	mux.HandleFunc("DELETE /admin/skills/{id}/items/{item}", s.withAuth(s.handleDeleteSkillItem))
+	mux.HandleFunc("GET /admin/skills/{id}/preview", s.withAuth(s.handlePreviewSkill))
 
 	// API keys.
 	mux.HandleFunc("GET /admin/api-keys", s.withAuth(s.handleListAPIKeys))
@@ -190,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/activity", s.withAuth(s.handleListActivity))
 	mux.HandleFunc("GET /admin/activity/{id}", s.withAuth(s.handleGetActivity))
 	mux.HandleFunc("GET /admin/usage", s.withAuth(s.handleUsage))
+	mux.HandleFunc("GET /admin/usage/models", s.withAuth(s.handleUsageModels))
 
 	// Dashboard & settings.
 	mux.HandleFunc("GET /admin/overview", s.withAuth(s.handleOverview))

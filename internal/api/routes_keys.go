@@ -34,9 +34,26 @@ type routePayload struct {
 	Fallbacks   []string `json:"fallback_model_ids"`
 }
 
+// resolvePolicyRef turns an optional policy id into a nullable reference.
+// The admin UI sends "" for "global / inherit", which must become NULL rather
+// than an empty-string foreign key.
+func (s *Server) resolvePolicyRef(raw *string) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	id := strings.TrimSpace(*raw)
+	if id == "" {
+		return nil, nil
+	}
+	if _, err := s.db.PolicyByID(id); err != nil {
+		return nil, fmt.Errorf("unknown policy id %q: select an existing policy or leave it empty", id)
+	}
+	return &id, nil
+}
+
 func (p routePayload) fallbackCSV() string {
 	if len(p.FallbackOn) == 0 {
-		return "rate_limit,timeout,upstream_5xx,network"
+		return "rate_limit,timeout,upstream_5xx,network,billing"
 	}
 	return store.JoinCSV(p.FallbackOn)
 }
@@ -54,6 +71,13 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	if strings.TrimSpace(req.Primary) == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_input", "primary model is required")
+		return
+	}
+	// An empty policy_id from the UI means "global / inherit", not a policy
+	// with an empty id. Storing "" used to trip the policy foreign key.
+	policyRef, err := s.resolvePolicyRef(req.PolicyID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
 	// Validate model references before touching the DB: route_target.model_id
@@ -79,7 +103,7 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	rt := &model.Route{
 		Alias: req.Alias, Description: strings.TrimSpace(req.Description), Enabled: true,
-		Strategy: "priority", Retry: 1, TimeoutMS: 30000, FallbackOn: req.fallbackCSV(), PolicyID: req.PolicyID,
+		Strategy: "priority", Retry: 1, TimeoutMS: 30000, FallbackOn: req.fallbackCSV(), PolicyID: policyRef,
 	}
 	if req.Enabled != nil {
 		rt.Enabled = *req.Enabled
@@ -110,8 +134,8 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 		writeErr(w, http.StatusInternalServerError, "save_failed", err.Error())
 		return
 	}
-	if req.PolicyID != nil && *req.PolicyID != "" {
-		_ = s.db.BindPolicy(*req.PolicyID, "route", rt.ID)
+	if policyRef != nil {
+		_ = s.db.BindPolicy(*policyRef, "route", rt.ID)
 	} else {
 		_ = s.db.BindPolicy("", "route", rt.ID)
 	}
@@ -160,11 +184,64 @@ func autoAlias(modelID string, taken func(string) bool) string {
 	return ""
 }
 
-// handleAutoRoutes creates one route per discovered provider model with
+// autoRoutePayload lets the operator pick exactly which discovered models get
+// a route. A missing field (nil slice) means "every eligible model", while an
+// explicitly empty list is a client error: clearing the selection and pressing
+// Add must never silently create one route per model.
+type autoRoutePayload struct {
+	ModelIDs []string `json:"model_ids"`
+}
+
+// handleAutoRoutes creates one route per selected discovered model with
 // sensible defaults (alias = model id, primary = that model, global policy).
-// Existing aliases are skipped, so the action is idempotent and safe to click
-// repeatedly after adding new providers or re-running model discovery.
+// Models that already own a route or whose provider is disabled/unavailable
+// are skipped, so the action is idempotent and safe to click repeatedly after
+// adding new providers or re-running model discovery.
 func (s *Server) handleAutoRoutes(w http.ResponseWriter, r *http.Request, _ *authSession) {
+	var req autoRoutePayload
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+		return
+	}
+	selected := make(map[string]bool, len(req.ModelIDs))
+	for _, id := range req.ModelIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			selected[id] = true
+		}
+	}
+	if req.ModelIDs != nil && len(selected) == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_input", "select at least one model to add")
+		return
+	}
+
+	// A model can only be reached through an enabled provider. The store folds
+	// model.available separately, so both flags are checked here.
+	providers, err := s.db.ListProviders()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	providerEnabled := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		providerEnabled[p.ID] = p.Enabled
+	}
+	// Skip models that already have a route: without this, running auto-add
+	// again would create a second alias pointing at the same model.
+	existingRoutes, err := s.db.ListRoutes()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	// Any target counts as routed, not just the primary: a model used as a
+	// fallback already has a path to clients, and creating a second alias for
+	// it would duplicate the same upstream.
+	routed := make(map[string]bool, len(existingRoutes))
+	for _, rt := range existingRoutes {
+		for _, target := range rt.Targets {
+			routed[target.ModelID] = true
+		}
+	}
+
 	models, err := s.db.ListModels()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error", err.Error())
@@ -173,7 +250,10 @@ func (s *Server) handleAutoRoutes(w http.ResponseWriter, r *http.Request, _ *aut
 	created := make([]*model.Route, 0, len(models))
 	skipped := 0
 	for _, m := range models {
-		if !m.Available {
+		if len(selected) > 0 && !selected[m.ID] {
+			continue
+		}
+		if !m.Available || !providerEnabled[m.ProviderID] || routed[m.ID] {
 			skipped++
 			continue
 		}
@@ -203,13 +283,14 @@ func (s *Server) handleAutoRoutes(w http.ResponseWriter, r *http.Request, _ *aut
 			Strategy:    "priority",
 			Retry:       1,
 			TimeoutMS:   30000,
-			FallbackOn:  "rate_limit,timeout,upstream_5xx,network",
+			FallbackOn:  "rate_limit,timeout,upstream_5xx,network,billing",
 			Targets:     []model.RouteTarget{{ModelID: m.ID, Role: "primary", Position: 0}},
 		}
 		if err := s.db.SaveRoute(rt); err != nil {
 			writeErr(w, http.StatusInternalServerError, "save_failed", err.Error())
 			return
 		}
+		routed[m.ID] = true
 		created = append(created, rt)
 	}
 	writeOK(w, map[string]any{"created": len(created), "skipped": skipped, "data": created})
@@ -258,11 +339,12 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request, _ *au
 		rt.FallbackOn = req.fallbackCSV()
 	}
 	if req.PolicyID != nil {
-		if *req.PolicyID == "" {
-			rt.PolicyID = nil
-		} else {
-			rt.PolicyID = req.PolicyID
+		policyRef, err := s.resolvePolicyRef(req.PolicyID)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_input", err.Error())
+			return
 		}
+		rt.PolicyID = policyRef
 	}
 	if strings.TrimSpace(req.Primary) != "" {
 		ids := []string{strings.TrimSpace(req.Primary)}
@@ -297,7 +379,11 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request, _ *au
 		return
 	}
 	if req.PolicyID != nil {
-		_ = s.db.BindPolicy(*req.PolicyID, "route", rt.ID)
+		if rt.PolicyID != nil {
+			_ = s.db.BindPolicy(*rt.PolicyID, "route", rt.ID)
+		} else {
+			_ = s.db.BindPolicy("", "route", rt.ID)
+		}
 	}
 	// API keys store allowed routes by alias. Renaming a route without
 	// rewriting those CSVs silently revokes access for every restricted key.
@@ -314,6 +400,59 @@ func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request, _ *au
 		return
 	}
 	writeOK(w, map[string]bool{"ok": true})
+}
+
+const maxBulkRoutes = 500
+
+type bulkRoutePayload struct {
+	Action string   `json:"action"`
+	IDs    []string `json:"ids"`
+}
+
+// handleBulkRoutes applies one action to a set of routes. The Routes page uses
+// it for multi-select enable/disable/delete so a large cleanup no longer needs
+// one request per row.
+func (s *Server) handleBulkRoutes(w http.ResponseWriter, r *http.Request, _ *authSession) {
+	var req bulkRoutePayload
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+		return
+	}
+	ids := make([]string, 0, len(req.IDs))
+	seen := make(map[string]bool, len(req.IDs))
+	for _, id := range req.IDs {
+		if id = strings.TrimSpace(id); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_input", "select at least one route")
+		return
+	}
+	if len(ids) > maxBulkRoutes {
+		writeErr(w, http.StatusBadRequest, "invalid_input",
+			fmt.Sprintf("too many routes in one request (max %d)", maxBulkRoutes))
+		return
+	}
+	switch req.Action {
+	case "enable", "disable":
+		n, err := s.db.SetRoutesEnabled(ids, req.Action == "enable")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "update_failed", err.Error())
+			return
+		}
+		writeOK(w, map[string]any{"updated": n})
+	case "delete":
+		n, err := s.db.DeleteRoutes(ids)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "delete_failed", err.Error())
+			return
+		}
+		writeOK(w, map[string]any{"deleted": n})
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid_input", "action must be enable, disable, or delete")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -349,12 +488,17 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request, _ *a
 		writeErr(w, http.StatusBadRequest, "invalid_input", "name is required")
 		return
 	}
+	policyRef, err := s.resolvePolicyRef(req.PolicyID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
 	secretPart := "mr-sk-" + store.RandomHex(24)
 	prefix := secretPart[:12]
 	key := &model.APIKey{
 		ID: store.NewID("key"), Name: req.Name, Prefix: prefix,
 		Hash: store.HashToken(secretPart), Enabled: true, CreatedAt: store.Now(),
-		ExpiresAt: req.ExpiresAt, PolicyID: req.PolicyID, AllowedRoutes: store.JoinCSV(req.AllowedRoutes),
+		ExpiresAt: req.ExpiresAt, PolicyID: policyRef, AllowedRoutes: store.JoinCSV(req.AllowedRoutes),
 	}
 	if req.Enabled != nil {
 		key.Enabled = *req.Enabled
@@ -363,8 +507,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request, _ *a
 		writeErr(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
 	}
-	if req.PolicyID != nil && *req.PolicyID != "" {
-		_ = s.db.BindPolicy(*req.PolicyID, "api_key", key.ID)
+	if policyRef != nil {
+		_ = s.db.BindPolicy(*policyRef, "api_key", key.ID)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"data": key,
@@ -404,12 +548,17 @@ func (s *Server) handleUpdateAPIKey(w http.ResponseWriter, r *http.Request, _ *a
 		target.ExpiresAt = req.ExpiresAt
 	}
 	if req.PolicyID != nil {
-		if *req.PolicyID == "" {
-			target.PolicyID = nil
-		} else {
-			target.PolicyID = req.PolicyID
+		policyRef, err := s.resolvePolicyRef(req.PolicyID)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_input", err.Error())
+			return
 		}
-		_ = s.db.BindPolicy(*req.PolicyID, "api_key", target.ID)
+		target.PolicyID = policyRef
+		if policyRef != nil {
+			_ = s.db.BindPolicy(*policyRef, "api_key", target.ID)
+		} else {
+			_ = s.db.BindPolicy("", "api_key", target.ID)
+		}
 	}
 	target.AllowedRoutes = store.JoinCSV(req.AllowedRoutes)
 	if err := s.db.UpdateAPIKey(target); err != nil {

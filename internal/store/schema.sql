@@ -201,7 +201,77 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   PRIMARY KEY (date, route_id, provider_id, api_key_id)
 );
 
+-- Per-model rollup so the dashboard can show which model/provider spent what.
+-- usage_daily stays provider/route/key scoped for backward compatibility.
+CREATE TABLE IF NOT EXISTS usage_model_daily (
+  date        TEXT NOT NULL,               -- YYYY-MM-DD (admin timezone)
+  provider_id TEXT NOT NULL DEFAULT '',
+  model_id    TEXT NOT NULL DEFAULT '',    -- model.id (mdl_...)
+  requests    INTEGER NOT NULL DEFAULT 0,
+  ok          INTEGER NOT NULL DEFAULT 0,
+  failed      INTEGER NOT NULL DEFAULT 0,
+  in_tokens   INTEGER NOT NULL DEFAULT 0,
+  out_tokens  INTEGER NOT NULL DEFAULT 0,
+  est_cost    REAL,
+  PRIMARY KEY (date, provider_id, model_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_model_date ON usage_model_daily(date);
+
 CREATE TABLE IF NOT EXISTS system_setting (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  type        TEXT NOT NULL,                 -- prompt|memory|retrieval
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  config      TEXT NOT NULL DEFAULT '{}',    -- JSON: prompt,max_chars,top_k,limit
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_item (
+  id         TEXT PRIMARY KEY,
+  skill_id   TEXT NOT NULL REFERENCES skill(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL DEFAULT 'note',   -- note|doc
+  source     TEXT NOT NULL DEFAULT '',
+  title      TEXT NOT NULL DEFAULT '',
+  content    TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_item_skill ON skill_item(skill_id, created_at DESC);
+
+-- A skill applies to every route when bound globally, or only to the named
+-- route aliases. Global bindings are what make every model inherit skills
+-- automatically (including routes created later).
+CREATE TABLE IF NOT EXISTS skill_binding (
+  id         TEXT PRIMARY KEY,
+  skill_id   TEXT NOT NULL REFERENCES skill(id) ON DELETE CASCADE,
+  scope_type TEXT NOT NULL,                -- global|route
+  scope_id   TEXT NOT NULL DEFAULT '',     -- route alias when scope_type=route
+  UNIQUE (skill_id, scope_type, scope_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_binding_skill ON skill_binding(skill_id);
+CREATE INDEX IF NOT EXISTS idx_skill_binding_scope ON skill_binding(scope_type, scope_id);
+
+-- Last ingest result per skill. Kept in its own table so the original skill
+-- contract (PRD) does not need an ALTER on existing databases.
+CREATE TABLE IF NOT EXISTS skill_state (
+  skill_id        TEXT PRIMARY KEY REFERENCES skill(id) ON DELETE CASCADE,
+  last_sync_at    INTEGER NOT NULL DEFAULT 0,
+  last_sync_error TEXT NOT NULL DEFAULT '',
+  last_sync_items INTEGER NOT NULL DEFAULT 0
+);
+
+-- Vision bridge cache: an image URL/data payload hashed to a text description.
+-- New table only, so existing databases upgrade without ALTER TABLE.
+CREATE TABLE IF NOT EXISTS skill_vision_cache (
+  hash        TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
 );

@@ -9,6 +9,7 @@ import (
 
 	"github.com/myrouter/myrouter/internal/logx"
 	"github.com/myrouter/myrouter/internal/model"
+	"github.com/myrouter/myrouter/internal/modelmeta"
 	"github.com/myrouter/myrouter/internal/provider"
 	"github.com/myrouter/myrouter/internal/secret"
 	"github.com/myrouter/myrouter/internal/store"
@@ -95,7 +96,97 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 	if err != nil {
 		created = p
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"data": created})
+	// Automation: a saved provider is probed immediately, and its models are
+	// imported so Routes can be created without any extra clicks.
+	models, conn := 0, providerConnection{Status: created.Status}
+	if created.Enabled && strings.TrimSpace(req.APIKey) != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		models, conn = s.discoverModels(ctx, created)
+		cancel()
+		if refreshed, err := s.db.ProviderByID(p.ID); err == nil {
+			created = refreshed
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"data": created, "connection": conn, "models": models,
+	})
+}
+
+// providerConnection is the result of the automatic connection probe returned
+// with provider create/update responses.
+type providerConnection struct {
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	LatencyMS int64  `json:"latency_ms"`
+}
+
+// providerStatusFor maps an upstream error category to a provider status badge.
+func providerStatusFor(pe *provider.Error) string {
+	switch pe.Category {
+	case provider.CatRateLimit:
+		return model.StatusRateLimited
+	case provider.CatAuth:
+		return model.StatusInvalidCred
+	case provider.CatTimeout:
+		return model.StatusDegraded
+	default:
+		return model.StatusUnavailable
+	}
+}
+
+// discoverModels validates the provider credential by listing upstream models,
+// imports/enriches them, and records the resulting status. It is the shared
+// path behind "Save provider", "Test connection + models" automation, the
+// manual refresh button and the periodic probe.
+func (s *Server) discoverModels(ctx context.Context, p *model.Provider) (int, providerConnection) {
+	start := time.Now()
+	conn := providerConnection{Status: model.StatusConnected}
+	apiKey, err := s.decrypt(p.ID)
+	if err != nil {
+		conn.Status, conn.Message = model.StatusInvalidCred, "credential unavailable"
+		_ = s.db.SetProviderStatus(p.ID, conn.Status, conn.Message, store.Now())
+		conn.LatencyMS = time.Since(start).Milliseconds()
+		return 0, conn
+	}
+	if apiKey == "" {
+		conn.Status, conn.Message = model.StatusInvalidCred, "no API key configured"
+		_ = s.db.SetProviderStatus(p.ID, conn.Status, conn.Message, store.Now())
+		conn.LatencyMS = time.Since(start).Milliseconds()
+		return 0, conn
+	}
+	infos, err := s.adapterFor(p).ListModels(ctx, provider.Credentials{APIKey: apiKey, BaseURL: p.BaseURL})
+	if err != nil {
+		pe := provider.AsError(err)
+		conn.Status, conn.Message = providerStatusFor(pe), pe.Message
+		_ = s.db.SetProviderStatus(p.ID, conn.Status, conn.Message, store.Now())
+		conn.LatencyMS = time.Since(start).Milliseconds()
+		return 0, conn
+	}
+	ids := make([]string, 0, len(infos))
+	for i := range infos {
+		info := infos[i]
+		display := strings.TrimSpace(info.DisplayName)
+		if display == "" {
+			display = info.ModelID
+		}
+		mdl := &model.Model{
+			ProviderID: p.ID, ModelID: info.ModelID, DisplayName: display,
+			ContextWindow: info.ContextWindow, PriceIn: info.PriceIn, PriceOut: info.PriceOut,
+			Capabilities: store.JoinCSV(info.Capabilities), Available: true,
+		}
+		// Official metadata (context window, prices, capabilities) wins over
+		// whatever the provider endpoint reported.
+		modelmeta.Apply(s.catalog, p, mdl)
+		id, err := s.db.UpsertModel(mdl)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	_ = s.db.DeleteModelsExcept(p.ID, ids)
+	_ = s.db.SetProviderStatus(p.ID, model.StatusConnected, "", store.Now())
+	conn.LatencyMS = time.Since(start).Milliseconds()
+	return len(ids), conn
 }
 
 func (s *Server) saveCredential(providerID, apiKey string) error {
@@ -194,7 +285,8 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		s.log.Warn("provider base_url changed",
 			logx.F("provider", p.ID), logx.F("base_url", newBaseURL))
 	}
-	if req.APIKey != "" {
+	keyChanged := strings.TrimSpace(req.APIKey) != ""
+	if keyChanged {
 		if err := s.saveCredential(p.ID, req.APIKey); err != nil {
 			s.log.Error("provider credential save failed", logx.F("provider", p.ID), logx.F("error", err.Error()))
 			writeErr(w, http.StatusInternalServerError, "credential_failed", "could not save credential")
@@ -202,7 +294,27 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		}
 	}
 	updated, _ := s.db.ProviderByID(p.ID)
-	writeOK(w, map[string]any{"data": updated})
+	if updated == nil {
+		updated = p
+	}
+	// Automation: every edit of an enabled provider re-probes and re-imports
+	// models so the response always reflects the real connection state and the
+	// model list stays fresh. Disabled providers are left untouched.
+	models, conn := 0, providerConnection{Status: updated.Status}
+	needProbe := updated.Enabled
+	if needProbe {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		models, conn = s.discoverModels(ctx, updated)
+		cancel()
+		if refreshed, err := s.db.ProviderByID(p.ID); err == nil {
+			updated = refreshed
+		}
+	} else if stored, err := s.db.ListModelsByProvider(p.ID); err == nil {
+		// Disabled providers are not probed; report their stored models so the
+		// client does not interpret "0" as a connection failure.
+		models = len(stored)
+	}
+	writeOK(w, map[string]any{"data": updated, "connection": conn, "models": models})
 }
 
 func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request, _ *authSession) {
@@ -218,6 +330,10 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request, _ *a
 	p, err := s.db.ProviderByID(s.pathID(r))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "not_found", "provider not found")
+		return
+	}
+	if !p.Enabled {
+		writeErr(w, http.StatusConflict, "provider_disabled", "provider is disabled; enable it before testing")
 		return
 	}
 	start := time.Now()
@@ -350,38 +466,19 @@ func (s *Server) handleRefreshModels(w http.ResponseWriter, r *http.Request, _ *
 		writeErr(w, http.StatusNotFound, "not_found", "provider not found")
 		return
 	}
-	apiKey, err := s.decrypt(p.ID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "credential_error", "cannot decrypt credential")
+	if !p.Enabled {
+		writeErr(w, http.StatusConflict, "provider_disabled", "provider is disabled; enable it before refreshing models")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	infos, err := s.adapterFor(p).ListModels(ctx, provider.Credentials{APIKey: apiKey, BaseURL: p.BaseURL})
-	if err != nil {
-		pe := provider.AsError(err)
-		_ = s.db.SetProviderStatus(p.ID, model.StatusUnavailable, pe.Message, store.Now())
-		writeErr(w, http.StatusBadGateway, "upstream_error", pe.Message)
+	count, conn := s.discoverModels(ctx, p)
+	if conn.Status != model.StatusConnected {
+		writeErr(w, http.StatusBadGateway, "upstream_error", conn.Message)
 		return
 	}
-	ids := make([]string, 0, len(infos))
-	for i := range infos {
-		info := infos[i]
-		mdl := &model.Model{
-			ProviderID: p.ID, ModelID: info.ModelID, DisplayName: info.DisplayName,
-			ContextWindow: info.ContextWindow, PriceIn: info.PriceIn, PriceOut: info.PriceOut,
-			Capabilities: store.JoinCSV(info.Capabilities), Available: true,
-		}
-		id, err := s.db.UpsertModel(mdl)
-		if err != nil {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	_ = s.db.DeleteModelsExcept(p.ID, ids)
-	_ = s.db.SetProviderStatus(p.ID, model.StatusConnected, "", store.Now())
 	list, _ := s.db.ListModelsByProvider(p.ID)
-	writeOK(w, map[string]any{"data": list, "count": len(list)})
+	writeOK(w, map[string]any{"data": list, "count": count})
 }
 
 func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request, _ *authSession) {

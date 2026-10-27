@@ -1,12 +1,14 @@
 package provider
 
 import (
-	"fmt"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -73,6 +75,27 @@ func (a *OpenAIAdapter) url(baseURL, path string) string {
 	return base + path
 }
 
+// modelsEndpoints returns candidate /models URLs for the provider. Most
+// providers expose the catalog next to the chat endpoint (base + /models).
+// Some gateways, such as OpenCode Console, serve the catalog from a sibling
+// path (/inference/v1/models) while chat completions live under
+// /inference/openai/v1/chat/completions, so the second candidate is tried
+// when the first one answers 404.
+func (a *OpenAIAdapter) modelsEndpoints(baseURL string) []string {
+	primary := a.url(baseURL, a.pathMod)
+	base := strings.TrimRight(baseURL, "/")
+	for _, marker := range []string{"/openai/v1", "/openai"} {
+		if i := strings.LastIndex(base, marker); i >= 0 {
+			alt := base[:i] + "/v1/models"
+			if alt != primary {
+				return []string{primary, alt}
+			}
+			break
+		}
+	}
+	return []string{primary}
+}
+
 func bearer(creds Credentials) map[string]string {
 	h := map[string]string{}
 	if creds.APIKey != "" {
@@ -81,9 +104,34 @@ func bearer(creds Credentials) map[string]string {
 	return h
 }
 
+// openAIHeaders merges the provider credential with client headers forwarded
+// by the gateway. OpenCode's free tier validates its own client headers
+// (x-opencode-*) and User-Agent, so those must reach the upstream unchanged.
+// Credential and transport headers are never taken from the client.
+func openAIHeaders(creds Credentials, req ChatRequest) map[string]string {
+	h := bearer(creds)
+	for k, vs := range req.Headers {
+		if len(vs) == 0 {
+			continue
+		}
+		switch http.CanonicalHeaderKey(k) {
+		case "Authorization", "Host", "Content-Length", "Content-Type", "Accept":
+			continue
+		}
+		h[k] = vs[0]
+	}
+	return h
+}
+
 // openAIChatBody builds the wire payload.
 func (a *OpenAIAdapter) openAIChatBody(model string, req ChatRequest, stream bool) map[string]any {
-	body := map[string]any{"model": model, "messages": req.Messages, "stream": stream}
+	messages := req.Messages
+	if extra := strings.TrimSpace(req.SystemExtra); extra != "" {
+		// Server-side skill context is prepended so it applies ahead of the
+		// conversation without mutating what the client sent.
+		messages = append([]ChatMessage{NewTextMessage("system", extra)}, messages...)
+	}
+	body := map[string]any{"model": model, "messages": messages, "stream": stream}
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
 	}
@@ -106,11 +154,21 @@ func (a *OpenAIAdapter) openAIChatBody(model string, req ChatRequest, stream boo
 
 // Validate performs a lightweight authenticated /models call.
 func (a *OpenAIAdapter) Validate(ctx context.Context, creds Credentials) error {
-	_, _, err := doJSON(ctx, a.client, http.MethodGet, a.url(creds.BaseURL, a.pathMod), bearer(creds), nil, nil)
-	if err != nil {
-		return MapHTTPError(err, a.MapError)
+	endpoints := a.modelsEndpoints(creds.BaseURL)
+	var lastErr error
+	for i, endpoint := range endpoints {
+		status, raw, err := doJSON(ctx, a.client, http.MethodGet, endpoint, bearer(creds), nil, nil)
+		if err == nil {
+			return nil
+		}
+		lastErr = MapHTTPError(err, a.MapError)
+		// Only fall through to the alternate catalog path on a 404.
+		if status != http.StatusNotFound || i == len(endpoints)-1 {
+			break
+		}
+		_ = raw
 	}
-	return nil
+	return lastErr
 }
 
 type openAIModels struct {
@@ -123,7 +181,21 @@ type openAIModels struct {
 // ListModels implements BaseProvider.
 func (a *OpenAIAdapter) ListModels(ctx context.Context, creds Credentials) ([]ModelInfo, error) {
 	var resp openAIModels
-	status, raw, err := doJSON(ctx, a.client, http.MethodGet, a.url(creds.BaseURL, a.pathMod), bearer(creds), nil, &resp)
+	var status int
+	var raw []byte
+	var err error
+	endpoints := a.modelsEndpoints(creds.BaseURL)
+	for i, endpoint := range endpoints {
+		resp = openAIModels{}
+		status, raw, err = doJSON(ctx, a.client, http.MethodGet, endpoint, bearer(creds), nil, &resp)
+		if err == nil {
+			break
+		}
+		// Only fall through to the alternate catalog path on a 404.
+		if status != http.StatusNotFound || i == len(endpoints)-1 {
+			break
+		}
+	}
 	if err != nil {
 		if status != 0 {
 			return nil, a.MapError(status, raw)
@@ -151,10 +223,27 @@ type openAIChatResponse struct {
 	Usage Usage `json:"usage"`
 }
 
+type toolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type toolCallAccum struct {
+	id   string
+	typ  string
+	name string
+	args strings.Builder
+}
+
 // Chat implements BaseProvider.
 func (a *OpenAIAdapter) Chat(ctx context.Context, creds Credentials, model string, req ChatRequest) (*ChatResponse, error) {
 	var resp openAIChatResponse
-	status, raw, err := doJSON(ctx, a.client, http.MethodPost, a.url(creds.BaseURL, a.pathChat), bearer(creds), a.openAIChatBody(model, req, false), &resp)
+	status, raw, err := doJSON(ctx, a.client, http.MethodPost, a.url(creds.BaseURL, a.pathChat), openAIHeaders(creds, req), a.openAIChatBody(model, req, false), &resp)
 	if err != nil {
 		if status != 0 {
 			if responsesHint(status, raw) {
@@ -167,6 +256,10 @@ func (a *OpenAIAdapter) Chat(ctx context.Context, creds Credentials, model strin
 	out := &ChatResponse{ID: resp.ID, Model: resp.Model, Usage: resp.Usage}
 	if len(resp.Choices) > 0 {
 		out.Content = resp.Choices[0].Message.Text()
+		out.Reasoning = firstReasoning(resp.Choices[0].Message)
+		if raw := resp.Choices[0].Message.ToolCalls; len(raw) > 0 && string(raw) != "null" {
+			out.ToolCalls = raw
+		}
 		out.Finish = resp.Choices[0].FinishReason
 	}
 	if out.Usage.TotalTokens == 0 {
@@ -177,7 +270,7 @@ func (a *OpenAIAdapter) Chat(ctx context.Context, creds Credentials, model strin
 
 // StreamChat implements BaseProvider.
 func (a *OpenAIAdapter) StreamChat(ctx context.Context, creds Credentials, model string, req ChatRequest) (<-chan StreamEvent, error) {
-	body, hdr, status, err := postStream(ctx, a.client, a.url(creds.BaseURL, a.pathChat), bearer(creds), a.openAIChatBody(model, req, true))
+	body, hdr, status, err := postStream(ctx, a.client, a.url(creds.BaseURL, a.pathChat), openAIHeaders(creds, req), a.openAIChatBody(model, req, true))
 	if err != nil {
 		var se *statusError
 		if errors.As(err, &se) {
@@ -188,13 +281,19 @@ func (a *OpenAIAdapter) StreamChat(ctx context.Context, creds Credentials, model
 		}
 		return nil, classifyTransport(err)
 	}
-	_ = hdr
+	// Some OpenAI-compatible providers ignore `stream: true` and answer with a
+	// regular JSON completion. Treat that as a one-event stream instead of
+	// silently yielding an empty response.
 	_ = status
+	if strings.Contains(strings.ToLower(hdr.Get("Content-Type")), "json") {
+		return streamFromJSONBody(body)
+	}
 	ch := make(chan StreamEvent, 16)
 	go func() {
 		defer close(ch)
 		defer body.Close()
 		reader := newSSEReader(body)
+		toolAcc := make(map[int]*toolCallAccum)
 		for {
 			payload, err := reader.next()
 			if err != nil {
@@ -209,7 +308,10 @@ func (a *OpenAIAdapter) StreamChat(ctx context.Context, creds Credentials, model
 			var chunk struct {
 				Choices []struct {
 					Delta struct {
-						Content string `json:"content"`
+						Content          string          `json:"content"`
+						ReasoningContent string          `json:"reasoning_content"`
+						Reasoning        string          `json:"reasoning"`
+						ToolCalls        []toolCallDelta `json:"tool_calls"`
 					} `json:"delta"`
 					FinishReason string `json:"finish_reason"`
 				} `json:"choices"`
@@ -229,7 +331,32 @@ func (a *OpenAIAdapter) StreamChat(ctx context.Context, creds Credentials, model
 			ev := StreamEvent{}
 			for _, c := range chunk.Choices {
 				ev.Delta += c.Delta.Content
+				if c.Delta.ReasoningContent != "" {
+					ev.Reasoning += c.Delta.ReasoningContent
+				} else {
+					ev.Reasoning += c.Delta.Reasoning
+				}
+				for _, tc := range c.Delta.ToolCalls {
+					a := toolAcc[tc.Index]
+					if a == nil {
+						a = &toolCallAccum{}
+						toolAcc[tc.Index] = a
+					}
+					if tc.ID != "" {
+						a.id = tc.ID
+					}
+					if tc.Type != "" {
+						a.typ = tc.Type
+					}
+					if tc.Function.Name != "" {
+						a.name = tc.Function.Name
+					}
+					a.args.WriteString(tc.Function.Arguments)
+				}
 				ev.Finish = c.FinishReason
+			}
+			if ev.Finish != "" && len(toolAcc) > 0 {
+				ev.ToolCalls = marshalToolCalls(toolAcc)
 			}
 			if chunk.Usage != nil {
 				ev.InputTok = chunk.Usage.InputTokens
@@ -241,12 +368,57 @@ func (a *OpenAIAdapter) StreamChat(ctx context.Context, creds Credentials, model
 	return ch, nil
 }
 
+// streamFromJSONBody turns a non-streaming JSON completion received on a
+// streaming request into a minimal single-event stream. Providers that ignore
+// the stream flag are common among OpenAI-compatible relays.
+func streamFromJSONBody(body io.ReadCloser) (<-chan StreamEvent, error) {
+	defer body.Close()
+	raw, err := io.ReadAll(io.LimitReader(body, 8<<20))
+	if err != nil {
+		return nil, classifyTransport(err)
+	}
+	var resp openAIChatResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &Error{Category: CatUpstream5xx,
+			Message: "upstream returned an unsupported response to a streaming request"}
+	}
+	var env struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	if len(resp.Choices) == 0 && env.Error != nil {
+		return nil, &Error{Category: CatUpstream5xx, Message: env.Error.Message}
+	}
+	ch := make(chan StreamEvent, 4)
+	if len(resp.Choices) > 0 {
+		m := resp.Choices[0].Message
+		if text := m.Text(); text != "" {
+			ch <- StreamEvent{Delta: text}
+		}
+		if len(m.ToolCalls) > 0 && string(m.ToolCalls) != "null" {
+			ch <- StreamEvent{ToolCalls: m.ToolCalls}
+		}
+		ch <- StreamEvent{
+			Finish:   resp.Choices[0].FinishReason,
+			InputTok: resp.Usage.InputTokens, OutputTok: resp.Usage.OutputTokens,
+		}
+	} else {
+		ch <- StreamEvent{Finish: "stop"}
+	}
+	close(ch)
+	return ch, nil
+}
+
 // MapError maps HTTP statuses to the normalized taxonomy.
 func (a *OpenAIAdapter) MapError(status int, body []byte) *Error {
 	msg := extractMessage(body)
 	switch {
 	case status == http.StatusTooManyRequests:
 		return &Error{Category: CatRateLimit, StatusCode: status, Message: msg}
+	case status == http.StatusPaymentRequired:
+		return &Error{Category: CatBilling, StatusCode: status, Message: msg}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return &Error{Category: CatAuth, StatusCode: status, Message: msg}
 	case status == http.StatusNotFound:
@@ -257,6 +429,40 @@ func (a *OpenAIAdapter) MapError(status int, body []byte) *Error {
 		return &Error{Category: CatInvalidRequest, StatusCode: status, Message: msg}
 	}
 	return &Error{Category: CatUnknown, StatusCode: status, Message: msg}
+}
+
+func firstReasoning(m ChatMessage) string {
+	if m.ReasoningContent != "" {
+		return m.ReasoningContent
+	}
+	return m.Reasoning
+}
+
+func marshalToolCalls(acc map[int]*toolCallAccum) json.RawMessage {
+	idxs := make([]int, 0, len(acc))
+	for i := range acc {
+		idxs = append(idxs, i)
+	}
+	sort.Ints(idxs)
+	out := make([]map[string]any, 0, len(idxs))
+	for _, i := range idxs {
+		a := acc[i]
+		typ := a.typ
+		if typ == "" {
+			typ = "function"
+		}
+		out = append(out, map[string]any{
+			"index": i,
+			"id":    a.id,
+			"type":  typ,
+			"function": map[string]any{
+				"name":      a.name,
+				"arguments": a.args.String(),
+			},
+		})
+	}
+	b, _ := json.Marshal(out)
+	return b
 }
 
 // extractMessage pulls a human-readable message out of an error body.
@@ -289,13 +495,11 @@ func errorMessage(status int, msg string) string {
 	return msg
 }
 
-
 // responsesHint reports whether an upstream 404 is really a "use the
 // Responses API" signal (body points at /v1/responses).
 func responsesHint(status int, body []byte) bool {
 	return status == http.StatusNotFound && strings.Contains(strings.ToLower(string(body)), "/v1/responses")
 }
-
 
 // responsesContentParts converts chat content parts into Responses API parts.
 // It returns nil for plain string content so the caller keeps the simple form.
@@ -332,7 +536,10 @@ func responsesContentParts(raw json.RawMessage) []map[string]any {
 
 // responsesBody builds a Responses API payload from a normalized ChatRequest.
 func (a *OpenAIAdapter) responsesBody(model string, req ChatRequest, stream bool) map[string]any {
-	input := make([]map[string]any, 0, len(req.Messages))
+	input := make([]map[string]any, 0, len(req.Messages)+1)
+	if extra := strings.TrimSpace(req.SystemExtra); extra != "" {
+		input = append(input, map[string]any{"role": "system", "content": extra})
+	}
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "tool":
@@ -412,7 +619,7 @@ type openAIResponsesResponse struct {
 	ID         string `json:"id"`
 	Model      string `json:"model"`
 	OutputText string `json:"output_text"`
-	Output []struct {
+	Output     []struct {
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -424,7 +631,7 @@ type openAIResponsesResponse struct {
 // chatViaResponses runs a non-streaming completion through the Responses API.
 func (a *OpenAIAdapter) chatViaResponses(ctx context.Context, creds Credentials, model string, req ChatRequest) (*ChatResponse, error) {
 	var resp openAIResponsesResponse
-	status, raw, err := doJSON(ctx, a.client, http.MethodPost, a.url(creds.BaseURL, a.pathResponses), bearer(creds), a.responsesBody(model, req, false), &resp)
+	status, raw, err := doJSON(ctx, a.client, http.MethodPost, a.url(creds.BaseURL, a.pathResponses), openAIHeaders(creds, req), a.responsesBody(model, req, false), &resp)
 	if err != nil {
 		if status != 0 {
 			return nil, a.MapError(status, raw)
@@ -453,7 +660,7 @@ func (a *OpenAIAdapter) chatViaResponses(ctx context.Context, creds Credentials,
 // streamViaResponses runs a streaming completion through the Responses API and
 // translates its SSE events into normalized StreamEvents.
 func (a *OpenAIAdapter) streamViaResponses(ctx context.Context, creds Credentials, model string, req ChatRequest) (<-chan StreamEvent, error) {
-	body, _, _, err := postStream(ctx, a.client, a.url(creds.BaseURL, a.pathResponses), bearer(creds), a.responsesBody(model, req, true))
+	body, _, _, err := postStream(ctx, a.client, a.url(creds.BaseURL, a.pathResponses), openAIHeaders(creds, req), a.responsesBody(model, req, true))
 	if err != nil {
 		var se *statusError
 		if errors.As(err, &se) {
@@ -478,8 +685,8 @@ func (a *OpenAIAdapter) streamViaResponses(ctx context.Context, creds Credential
 				return
 			}
 			var ev struct {
-				Type  string `json:"type"`
-				Delta string `json:"delta"`
+				Type     string `json:"type"`
+				Delta    string `json:"delta"`
 				Response *struct {
 					Usage *responsesUsage `json:"usage"`
 				} `json:"response"`

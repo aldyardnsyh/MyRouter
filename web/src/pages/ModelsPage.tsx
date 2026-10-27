@@ -130,13 +130,23 @@ export function ProviderDetailPage() {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-h2 text-text">{provider?.name ?? '…'}</h1>
+                {provider && !provider.enabled && <Badge tone="neutral" dot={false}>Disabled</Badge>}
                 {provider && <StatusBadge spec={statusSpec[provider.status] ?? statusSpec.unknown} />}
               </div>
               <p className="font-mono text-[11.5px] text-muted">{provider?.base_url}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="compact" icon={<RefreshCw size={14} />} onClick={() => void refreshModels()}>Refresh Models</Button>
+            <Button
+              variant="secondary"
+              size="compact"
+              icon={<RefreshCw size={14} />}
+              onClick={() => void refreshModels()}
+              disabled={provider ? !provider.enabled : false}
+              title={provider && !provider.enabled ? 'Aktifkan provider dulu untuk refresh model.' : undefined}
+            >
+              Refresh Models
+            </Button>
           </div>
         </div>
       </div>
@@ -311,6 +321,9 @@ export function ModelsPage() {
         <div>
           <h1 className="text-display text-text">Models</h1>
           <p className="mt-1 text-[13px] text-muted">Every upstream model discovered across your providers. Prices are per 1M tokens.</p>
+          <p className="mt-1 text-[12px] text-muted">
+            Context windows and prices are filled from the official models.dev catalog when available.
+          </p>
         </div>
         <Button variant="secondary" size="compact" onClick={() => void load()} loading={loading}>Refresh</Button>
       </div>

@@ -7,7 +7,7 @@ import { DataTable, type Column } from '../components/ui/DataTable';
 import { Field, Input, Select } from '../components/ui/Field';
 import { useToast } from '../components/ui/Toast';
 import { admin, ApiError, streamPlayground } from '../lib/api';
-import { formatNumber } from '../lib/format';
+import { formatNumber, primaryOf, fallbacksOf, routeHasUsableTarget } from '../lib/format';
 import type { PlaygroundResult, Provider, Route, Status } from '../lib/types';
 
 interface UpstreamHealth {
@@ -21,6 +21,31 @@ function statusTone(status: string): 'success' | 'danger' | 'warning' | 'neutral
   if (status === 'error' || status === 'blocked') return 'danger';
   if (status === 'partial') return 'warning';
   return 'neutral';
+}
+
+// A route alias is usually derived from its model id, so appending the model
+// again produced labels like "glm-5.3 · glm-5.3". Show the model only when it
+// adds information, and collapse the alias when the data is duplicated.
+function routeOptionLabel(alias: string, model: string): string {
+  const a = (alias || '').trim();
+  let m = (model || '').trim();
+  if (!m) return a;
+  if (!a) return m;
+  if (m === a) return a;
+  if (m.startsWith(a)) {
+    const rest = m.slice(a.length).replace(/^[\s·:/-]+/, '');
+    if (!rest || rest === a) return a;
+    m = rest;
+  }
+  // Collapse "a · a" style values produced by duplicated target metadata.
+  if (m === a) return a;
+  return `${a} · ${m}`;
+}
+
+function dedupeModel(alias: string, model: string): string {
+  const a = (alias || '').trim();
+  const m = (model || '').trim();
+  return m === a ? '' : m;
 }
 
 export function PlaygroundPage() {
@@ -59,7 +84,7 @@ export function PlaygroundPage() {
       const list = r.data ?? [];
       setRoutes(list);
       setProviders(p.data ?? []);
-      setRoute((current) => current || list.find((x) => x.enabled)?.alias || list[0]?.alias || '');
+      setRoute((current) => current || list.find((x) => x.enabled && routeHasUsableTarget(x))?.alias || list[0]?.alias || '');
       setLoadError('');
     } catch (err) {
       setLoadError(err instanceof ApiError ? err.message : 'Could not load routes and providers');
@@ -87,6 +112,37 @@ export function PlaygroundPage() {
     }),
     [route, system, prompt, maxTokens, temperature],
   );
+
+  // Only routes that can actually serve are offered here: a route whose
+  // providers are all disabled would just fail, and it no longer exists for
+  // clients either.
+  const runnableRoutes = useMemo(
+    () => routes.filter((r) => r.enabled && routeHasUsableTarget(r)),
+    [routes],
+  );
+
+  // Group aliases by the provider behind their primary target. With many
+  // providers a flat list of aliases is unreadable, because the alias alone
+  // does not say which upstream and model it will hit.
+  const routeGroups = useMemo(() => {
+    const groups = new Map<string, { id: string; label: string; routes: Route[] }>();
+    for (const r of runnableRoutes) {
+      const primary = primaryOf(r);
+      const id = primary?.provider_id || 'unassigned';
+      const label = primary?.provider_name || 'Tanpa provider';
+      const group = groups.get(id) ?? { id, label, routes: [] };
+      group.routes.push(r);
+      groups.set(id, group);
+    }
+    return Array.from(groups.values())
+      .map((g) => ({ ...g, routes: [...g.routes].sort((a, b) => a.alias.localeCompare(b.alias)) }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [runnableRoutes]);
+
+  const selectedRoute = useMemo(() => routes.find((r) => r.alias === route) ?? null, [routes, route]);
+  const selectedPrimary = selectedRoute ? primaryOf(selectedRoute) : undefined;
+  const selectedModel = selectedPrimary?.model_name || selectedPrimary?.model_id || '';
+  const selectedFallbacks = selectedRoute ? fallbacksOf(selectedRoute).length : 0;
 
   function startTimer() {
     const started = performance.now();
@@ -148,9 +204,9 @@ export function PlaygroundPage() {
   }
 
   async function compareAll() {
-    const aliases = routes.filter((r) => r.enabled).map((r) => r.alias);
+    const aliases = runnableRoutes.map((r) => r.alias);
     if (aliases.length === 0) {
-      setRunError('Tidak ada route aktif untuk dibandingkan.');
+      setRunError('Tidak ada route aktif dengan provider yang siap untuk dibandingkan.');
       return;
     }
     setRunError('');
@@ -175,9 +231,15 @@ export function PlaygroundPage() {
   }
 
   async function testAllUpstreams() {
-    if (providers.length === 0) return;
+    // Disabled providers are not in rotation, so health-checking them is noise
+    // (and the API rejects it).
+    const targets = providers.filter((p) => p.enabled);
+    if (targets.length === 0) {
+      setRunError('Tidak ada provider aktif untuk diuji. Aktifkan provider dulu.');
+      return;
+    }
     setTestingAll(true);
-    for (const p of providers) {
+    for (const p of targets) {
       try {
         const res = await admin.providers.test(p.id);
         setHealth((prev) => ({ ...prev, [p.id]: { status: res.status, message: res.message, latency_ms: res.latency_ms } }));
@@ -257,21 +319,46 @@ export function PlaygroundPage() {
           Belum ada route. Tambahkan provider, refresh model, lalu buat route sebelum memakai Test Lab.
         </Callout>
       )}
+      {routes.length > 0 && runnableRoutes.length === 0 && !loading && (
+        <Callout tone="warning">
+          Tidak ada route yang bisa diuji: semua provider targetnya sedang nonaktif. Aktifkan provider di halaman Providers.
+        </Callout>
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         <Card className="lg:col-span-5">
           <CardHeader title="Request" description="Pilih route (alias), lalu kirim prompt." />
           <div className="flex flex-col gap-3">
-            <Field label="Route alias" required hint="Route menentukan provider dan fallback yang diuji.">
+            <Field label="Route alias" required hint="Dikelompokkan per provider, dengan model yang dipakai, supaya route mirip tetap bisa dibedakan.">
               <Select value={route} onChange={(e) => setRoute(e.target.value)}>
-                {routes.length === 0 && <option value="">No routes</option>}
-                {routes.map((r) => (
-                  <option key={r.id} value={r.alias}>
-                    {r.alias}{r.enabled ? '' : ' (disabled)'}
-                  </option>
+                {runnableRoutes.length === 0 && <option value="">No runnable routes</option>}
+                {routeGroups.map((g) => (
+                  <optgroup key={g.id} label={g.label}>
+                    {g.routes.map((r) => {
+                      const primary = primaryOf(r);
+                      const model = primary?.model_name || primary?.model_id || '';
+                      return (
+                        <option key={r.id} value={r.alias}>
+                          {routeOptionLabel(r.alias, model)}{r.enabled ? '' : ' (disabled)'}
+                        </option>
+                      );
+                    })}
+                  </optgroup>
                 ))}
               </Select>
             </Field>
+            {selectedRoute && (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
+                <span className="rounded-control border border-border bg-surface px-1.5 py-0.5 font-mono">
+                  {selectedPrimary?.provider_name || 'Tanpa provider'}
+                </span>
+                {selectedModel && dedupeModel(selectedRoute.alias, selectedModel) && (
+                  <span className="rounded-control border border-border bg-surface px-1.5 py-0.5 font-mono">{dedupeModel(selectedRoute.alias, selectedModel)}</span>
+                )}
+                <span>{selectedFallbacks ? `${selectedFallbacks} fallback` : 'tanpa fallback'}</span>
+                {!selectedRoute.enabled && <span className="font-medium text-warning">route nonaktif</span>}
+              </div>
+            )}
             <Field label="Prompt" required>
               <textarea
                 value={prompt}
@@ -435,7 +522,9 @@ export function PlaygroundPage() {
                     <span className="rounded-control border border-border bg-surface px-1.5 py-0.5 text-[10.5px] text-muted">{p.type}</span>
                   </div>
                   <div className="flex items-center gap-3">
-                    {h ? (
+                    {!p.enabled ? (
+                      <Badge tone="neutral" dot={false}>Disabled</Badge>
+                    ) : h ? (
                       <>
                         <StatusBadge spec={{ label: h.status.replace('_', ' '), tone: h.status === 'connected' ? 'success' : h.status === 'rate_limited' || h.status === 'degraded' ? 'warning' : 'danger' }} />
                         <span className="font-mono text-[11px] text-muted">{h.latency_ms} ms</span>

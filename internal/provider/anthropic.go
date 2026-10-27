@@ -103,8 +103,15 @@ func anthropicBody(model string, req ChatRequest, stream bool) map[string]any {
 		"max_tokens": 4096,
 		"stream":     stream,
 	}
-	if req.System != "" {
-		body["system"] = req.System
+	system := req.System
+	if extra := strings.TrimSpace(req.SystemExtra); extra != "" {
+		if system != "" {
+			system += "\n\n"
+		}
+		system += extra
+	}
+	if system != "" {
+		body["system"] = system
 	}
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
@@ -235,6 +242,8 @@ func (a *AnthropicAdapter) MapError(status int, body []byte) *Error {
 	switch {
 	case status == http.StatusTooManyRequests:
 		return &Error{Category: CatRateLimit, StatusCode: status, Message: msg}
+	case status == http.StatusPaymentRequired:
+		return &Error{Category: CatBilling, StatusCode: status, Message: msg}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return &Error{Category: CatAuth, StatusCode: status, Message: msg}
 	case status == http.StatusNotFound:

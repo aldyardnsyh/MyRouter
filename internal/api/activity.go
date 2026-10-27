@@ -87,6 +87,22 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request, _ *authSess
 	writeOK(w, map[string]any{"data": rows, "summary": m, "group_by": groupBy, "days": days})
 }
 
+// handleUsageModels returns estimated spend per provider+model with the unit
+// prices that produced the estimate.
+func (s *Server) handleUsageModels(w http.ResponseWriter, r *http.Request, _ *authSession) {
+	days := atoiDefault(r.URL.Query().Get("days"), 7)
+	if days <= 0 || days > 90 {
+		days = 7
+	}
+	since := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	rows, err := s.db.UsageModelAggregate(since)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	writeOK(w, map[string]any{"data": rows, "days": days})
+}
+
 // seriesRange maps a dashboard range to bucket count and width. Hourly for a
 // single day keeps the intraday shape; daily for 3d and 7d keeps the buckets
 // wide enough to read on a card.

@@ -127,8 +127,8 @@ func TestIsPrivateIP(t *testing.T) {
 }
 
 func TestErrorCategories(t *testing.T) {
-	if !FallbackEligible(CatRateLimit) || !FallbackEligible(CatTimeout) || !FallbackEligible(CatUpstream5xx) || !FallbackEligible(CatNetwork) {
-		t.Fatal("429/timeout/5xx/network must be fallback eligible")
+	if !FallbackEligible(CatRateLimit) || !FallbackEligible(CatTimeout) || !FallbackEligible(CatUpstream5xx) || !FallbackEligible(CatNetwork) || !FallbackEligible(CatBilling) {
+		t.Fatal("429/timeout/5xx/network/billing must be fallback eligible")
 	}
 	if FallbackEligible(CatAuth) || FallbackEligible(CatInvalidRequest) || FallbackEligible(CatNotFound) {
 		t.Fatal("auth/invalid/notfound must NOT be fallback eligible")
@@ -142,6 +142,7 @@ func TestMapErrorStatuses(t *testing.T) {
 		category ErrorCategory
 	}{
 		{429, CatRateLimit},
+		{402, CatBilling},
 		{401, CatAuth},
 		{403, CatAuth},
 		{404, CatNotFound},

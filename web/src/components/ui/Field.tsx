@@ -1,4 +1,5 @@
-import { cloneElement, forwardRef, isValidElement, useId, type InputHTMLAttributes, type ReactElement, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { cloneElement, forwardRef, isValidElement, useId, useState, type InputHTMLAttributes, type ReactElement, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
 import { classNames } from '../../lib/format';
 
 const baseControl =
@@ -89,6 +90,38 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       ref={ref}
       className={classNames(baseControl, 'h-9 px-3', mono && 'font-mono text-[12.5px]', invalid && 'border-danger', className)}
       {...rest}
+    />
+  );
+});
+
+// Password field with an always-visible reveal toggle. The browser's own
+// reveal button only appears while the input has focus, so it vanishes after a
+// failed submit; this one is part of the control and never resets.
+export const PasswordInput = forwardRef<HTMLInputElement, Omit<InputProps, 'type'>>(function PasswordInput(
+  { suffix, ...props },
+  ref,
+) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <Input
+      ref={ref}
+      {...props}
+      type={visible ? 'text' : 'password'}
+      suffix={
+        <>
+          {suffix}
+          <button
+            type="button"
+            onClick={() => setVisible((v) => !v)}
+            aria-label={visible ? 'Sembunyikan password' : 'Tampilkan password'}
+            aria-pressed={visible}
+            title={visible ? 'Sembunyikan password' : 'Tampilkan password'}
+            className="flex h-7 w-7 items-center justify-center rounded-control text-muted transition-colors hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            {visible ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+        </>
+      }
     />
   );
 });
