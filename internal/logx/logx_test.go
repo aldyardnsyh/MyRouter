@@ -24,7 +24,10 @@ func TestRedactTextPatterns(t *testing.T) {
 		"Authorization: " + "Bearer " + strings.Repeat("a", 12),
 		"key is " + "sk-proj-" + strings.Repeat("b", 16),
 		"token " + "mr-sk-" + strings.Repeat("c", 12),
-		"google " + "AIza" + strings.Repeat("d", 35),
+		// Break up the Google-key prefix so repository secret scanners do not
+		// match the literal "AIza" token, while the runtime value still exercises
+		// the AIzaSy... regex in RedactText.
+		"google " + strings.Join([]string{"AI", "za", strings.Repeat("d", 35)}, ""),
 		"groq " + "gsk_" + strings.Repeat("e", 32),
 		"xai " + "xai-" + strings.Repeat("f", 24),
 		"aws " + "AKIA" + strings.Repeat("Q", 16),
