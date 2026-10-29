@@ -104,9 +104,9 @@ export function ApiKeysPage() {
     }
   }
 
-  // Uses the secret while it is still on screen: writes this key plus every
-  // enabled route into the OpenCode config so the new models appear after a
-  // restart, without hand editing opencode.json.
+  // Optional convenience: writes this key plus every enabled route into the
+  // OpenCode config. Never auto-called — sync tanpa api_key tetap jalan
+  // (hanya update models), jadi tidak ada key baru yang terbuat sia-sia.
   async function syncNewKeyToOpencode() {
     if (!secret) return;
     setSyncingOpencode(true);

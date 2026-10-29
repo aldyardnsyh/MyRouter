@@ -76,10 +76,15 @@ export function SettingsPage() {
     }
   }
 
-  async function syncOpencode() {
+  async function syncOpencode(withKey: boolean) {
     setSyncing(true);
     try {
-      const res = await admin.opencode.sync({ api_key: syncKey.trim() || undefined });
+      const key = withKey ? syncKey.trim() : '';
+      if (withKey && !key) {
+        toast.error('Isi API key dulu, atau pakai "Sync models only".');
+        return;
+      }
+      const res = await admin.opencode.sync(key ? { api_key: key } : {});
       const added = res.data.added.length;
       toast.success(
         added > 0
@@ -336,9 +341,18 @@ export function SettingsPage() {
                       size="compact"
                       loading={syncing}
                       disabled={!opencode?.writable}
-                      onClick={() => void syncOpencode()}
+                      onClick={() => void syncOpencode(false)}
                     >
-                      Sync to OpenCode
+                      Sync models only
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="compact"
+                      loading={syncing}
+                      disabled={!opencode?.writable || !syncKey.trim()}
+                      onClick={() => void syncOpencode(true)}
+                    >
+                      Sync + write key
                     </Button>
                     <span className="text-[11.5px] text-muted">Restart OpenCode after a sync to load new models.</span>
                   </div>

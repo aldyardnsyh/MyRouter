@@ -24,6 +24,7 @@ type skillDTO struct {
 	Enabled     bool                `json:"enabled"`
 	Config      map[string]any      `json:"config"`
 	ItemCount   int                 `json:"item_count"`
+	WillInject  bool                `json:"will_inject"`
 	CreatedAt   int64               `json:"created_at"`
 	Bindings    model.SkillBindings `json:"bindings"`
 	SyncAt      int64               `json:"last_sync_at"`
@@ -40,9 +41,11 @@ func toSkillDTO(s model.Skill) skillDTO {
 	if routes == nil {
 		routes = []string{}
 	}
+	bound := s.Bindings.Global || len(routes) > 0
 	return skillDTO{
 		ID: s.ID, Name: s.Name, Description: s.Description, Type: s.Type,
-		Enabled: s.Enabled, Config: cfg, ItemCount: s.ItemCount, CreatedAt: s.CreatedAt,
+		Enabled: s.Enabled, Config: cfg, ItemCount: s.ItemCount, WillInject: willInject(s, bound),
+		CreatedAt: s.CreatedAt,
 		Bindings: model.SkillBindings{Global: s.Bindings.Global, Routes: routes},
 		SyncAt:   s.SyncAt, SyncError: s.SyncError, SyncItems: s.SyncItems,
 	}
@@ -515,6 +518,26 @@ func truncateUTF8Bytes(s string, max int) string {
 		b = b[:len(b)-1]
 	}
 	return string(b) + "\n\n[... truncated by MyRouter: skill content too long]"
+}
+
+// willInject reports whether a skill can actually contribute context to a
+// bound request. Enabled + bound is not enough: a prompt skill with no prompt
+// text and a memory/retrieval/chat skill with no knowledge items is a no-op,
+// and vision skills inject via the image bridge (no text block needed).
+func willInject(s model.Skill, bound bool) bool {
+	if !s.Enabled || !bound {
+		return false
+	}
+	if s.Type == model.SkillVision {
+		return true
+	}
+	if s.Type == model.SkillPrompt {
+		if prompt := strings.TrimSpace(skills.ParseConfig(s.Config).Prompt); prompt != "" {
+			return true
+		}
+		return strings.TrimSpace(s.Description) != ""
+	}
+	return s.ItemCount > 0
 }
 
 // encodeSkillConfig validates the config object and stores it as JSON text.

@@ -150,6 +150,11 @@ function SkillCard({ skill, toggling, syncing, onToggle, onEdit, onKnowledge, on
                 Built-in
               </Badge>
             )}
+            {!skill.will_inject && (
+              <Badge tone="warning" dot={false}>
+                Kosong — tidak akan diinject
+              </Badge>
+            )}
           </div>
           <p className="mt-1 text-[12.5px] leading-relaxed text-muted">{skill.description || 'No description'}</p>
         </div>
