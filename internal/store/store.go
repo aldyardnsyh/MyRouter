@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,7 +24,11 @@ type DB struct {
 }
 
 // Open opens (or creates) the SQLite database, applies pragmas and schema.
+// Before opening, it migrates a larger legacy database (e.g. one created when
+// DataDir was relative to the working directory) into place so there is only
+// ever one live database.
 func Open(path string) (*DB, error) {
+	migrateLegacyDB(path)
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)", path)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -70,6 +76,45 @@ func (db *DB) migrate() error {
 
 // Now returns the current unix timestamp in seconds.
 func Now() int64 { return time.Now().Unix() }
+
+// migrateLegacyDB moves a larger database created under a previous DataDir
+// layout (e.g. "./data" relative to a different working directory) into the
+// current path, so there is only ever one live database. It only acts when
+// the current path has no meaningful database yet and a clearly larger one
+// exists next to the current working directory.
+func migrateLegacyDB(path string) {
+	if st, err := os.Stat(path); err == nil && st.Size() > 64*1024 {
+		return // current DB already has real data
+	}
+	candidates := []string{
+		filepath.Join("data", "myrouter.db"),
+		filepath.Join("..", "data", "myrouter.db"),
+	}
+	best := ""
+	var bestSize int64
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err != nil || abs == path {
+			continue
+		}
+		st, err := os.Stat(abs)
+		if err != nil || st.Size() <= 64*1024 {
+			continue
+		}
+		if st.Size() > bestSize {
+			best, bestSize = abs, st.Size()
+		}
+	}
+	if best == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	if data, err := os.ReadFile(best); err == nil {
+		_ = os.WriteFile(path, data, 0o600)
+	}
+}
 
 // NewID generates a short, sortable, URL-safe identifier.
 func NewID(prefix string) string {

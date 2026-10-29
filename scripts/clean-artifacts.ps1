@@ -49,6 +49,11 @@ if (Test-Path -LiteralPath $dist) {
     ForEach-Object { Remove-Target $_.FullName }
 }
 
+# 1b) Root console binary from non-GUI builds: the desktop build in dist/ is
+# the single live binary. A stale myrouter.exe at the root confuses tooling
+# (two exes, two working directories, two databases).
+Remove-Target (Join-Path $root "myrouter.exe")
+
 # 2) Root patch backups: keep only the most recent one.
 Get-ChildItem -LiteralPath $root -Force -Directory -Filter ".backup-patch-*" |
   Sort-Object LastWriteTime -Descending |
