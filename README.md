@@ -210,9 +210,20 @@ inserted as extra system context; clients do not need to change anything.
   Q/A and retrieves similar exchanges), `vision` (describes images with a
   vision-capable model when the target cannot see them), `memory` (manual
   notes), `core` (house rules, disabled by default).
-- Retrieval skills ingest `config.sync_paths` (local files) on **Sync now** or
-  every `sync_interval_min` in the background. Point `xerj` at a folder of
-  cloned libraries and `ai-memory` at `<ai-memory data dir>/wiki`.
+- Retrieval skills ingest `config.sync_paths` (local files) on **Sync now**,
+  every `sync_interval_min` in the background, **and automatically on the first
+  request that needs them** (on-request sync: never-synced skills sync inline
+  once, stale ones refresh in the background without slowing the request).
+  Point `xerj` at a folder of cloned libraries and `ai-memory` at
+  `<ai-memory data dir>/wiki`. The Skills page shows **Last sync** per skill so
+  you can verify freshness.
+- Ranking is hybrid BM25 (rare terms weigh more, short dense docs beat long
+  diluted ones) with field bonuses (title/source) and slight chat freshness.
+- Chat ↔ memory complement each other: repeated preference patterns in
+  `chat-knowledge` captures (3x in 7 days) are auto-promoted to permanent
+  `memory` items. Injection budget prioritises prompt → memory → rest.
+- Vision skills also inject their capability text (not only via the image
+  bridge), so the model knows the visual capability on text-only requests.
 - The response header `X-MyRouter-Skills` lists the skills that contributed, and
   the Activity detail shows a `skills` trace step with retrieval counts.
 - Privacy: `chat-knowledge` stores captured question/answer pairs in the local
@@ -224,9 +235,12 @@ config, manage knowledge items, and bind to all models or specific routes. Use
 **Test Lab** to send a real prompt through a route - skills are applied
 automatically and the result shows which provider/model answered. **Import from
 skills.sh** accepts a pasted skills.sh link (for example
-`https://skills.sh/owner/repo/skill`) - MyRouter fetches the `SKILL.md` from the
-public GitHub repo and installs it as a prompt skill, bound to all models by
-default.
+`https://skills.sh/owner/repo/skill`), a GitHub repo URL, an `owner/repo/skill`
+shorthand, or even the `npx skills add <url> --skill <name>` command form -
+MyRouter fetches the `SKILL.md` from the public GitHub repo, infers the skill
+type and capability, seeds starter content, and binds it to all models by
+default. Fuzzy name matching resolves skills whose directory name differs
+(e.g. `--skill hyperframes-animation` → `skills/hyperframes/SKILL.md`).
 
 ## Docker
 

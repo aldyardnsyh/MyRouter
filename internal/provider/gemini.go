@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,21 +26,21 @@ func (a *GeminiAdapter) DefaultBaseURL() string {
 	return "https://generativelanguage.googleapis.com/v1beta"
 }
 
-func (a *GeminiAdapter) url(baseURL, path, apiKey string) string {
+func (a *GeminiAdapter) url(baseURL, path string) string {
 	base := strings.TrimRight(baseURL, "/")
 	if base == "" {
 		base = a.DefaultBaseURL()
 	}
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-	return fmt.Sprintf("%s%s%sx-goog-api-key=%s", base, path, sep, url.QueryEscape(apiKey))
+	return base + path
+}
+
+func geminiHeaders(apiKey string) map[string]string {
+	return map[string]string{"x-goog-api-key": apiKey}
 }
 
 // Validate implements BaseProvider.
 func (a *GeminiAdapter) Validate(ctx context.Context, creds Credentials) error {
-	_, _, err := doJSON(ctx, a.client, http.MethodGet, a.url(creds.BaseURL, "/models", creds.APIKey), nil, nil, nil)
+	_, _, err := doJSON(ctx, a.client, http.MethodGet, a.url(creds.BaseURL, "/models"), geminiHeaders(creds.APIKey), nil, nil)
 	if err != nil {
 		return MapHTTPError(err, a.MapError)
 	}
@@ -59,7 +58,7 @@ type geminiModels struct {
 // ListModels implements BaseProvider.
 func (a *GeminiAdapter) ListModels(ctx context.Context, creds Credentials) ([]ModelInfo, error) {
 	var resp geminiModels
-	status, raw, err := doJSON(ctx, a.client, http.MethodGet, a.url(creds.BaseURL, "/models?pageSize=200", creds.APIKey), nil, nil, &resp)
+	status, raw, err := doJSON(ctx, a.client, http.MethodGet, a.url(creds.BaseURL, "/models?pageSize=200"), geminiHeaders(creds.APIKey), nil, &resp)
 	if err != nil {
 		if status != 0 {
 			return nil, a.MapError(status, raw)
@@ -163,7 +162,7 @@ type geminiResponse struct {
 func (a *GeminiAdapter) Chat(ctx context.Context, creds Credentials, model string, req ChatRequest) (*ChatResponse, error) {
 	var resp geminiResponse
 	path := "/models/" + url.PathEscape(model) + ":generateContent"
-	status, raw, err := doJSON(ctx, a.client, http.MethodPost, a.url(creds.BaseURL, path, creds.APIKey), nil, geminiBody(req), &resp)
+	status, raw, err := doJSON(ctx, a.client, http.MethodPost, a.url(creds.BaseURL, path), geminiHeaders(creds.APIKey), geminiBody(req), &resp)
 	if err != nil {
 		if status != 0 {
 			return nil, a.MapError(status, raw)
@@ -188,7 +187,7 @@ func (a *GeminiAdapter) Chat(ctx context.Context, creds Credentials, model strin
 // StreamChat implements BaseProvider using streamGenerateContent&alt=sse.
 func (a *GeminiAdapter) StreamChat(ctx context.Context, creds Credentials, model string, req ChatRequest) (<-chan StreamEvent, error) {
 	path := "/models/" + url.PathEscape(model) + ":streamGenerateContent?alt=sse"
-	body, _, _, err := postStream(ctx, a.client, a.url(creds.BaseURL, path, creds.APIKey), nil, geminiBody(req))
+	body, _, _, err := postStream(ctx, a.client, a.url(creds.BaseURL, path), geminiHeaders(creds.APIKey), geminiBody(req))
 	if err != nil {
 		var se *statusError
 		if errors.As(err, &se) {
