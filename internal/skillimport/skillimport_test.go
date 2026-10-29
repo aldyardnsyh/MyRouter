@@ -72,6 +72,9 @@ func TestParseRef(t *testing.T) {
 		{"shorthand repo", "vercel-labs/skills", "vercel-labs", "skills", ""},
 		{"shorthand skill", "vercel-labs/skills/find-skills", "vercel-labs", "skills", "find-skills"},
 		{"shorthand padded", " Vercel-Labs/Skills/Find-Skills ", "Vercel-Labs", "Skills", "Find-Skills"},
+		{"npx github url + skill flag", "npx skills add https://github.com/vercel-labs/skills --skill find-skills", "vercel-labs", "skills", "find-skills"},
+		{"npx skills.sh url + skill flag", "npx skills add https://skills.sh/vercel-labs/skills/find-skills --skill find-skills", "vercel-labs", "skills", "find-skills"},
+		{"npx github url no flag", "npx skills add https://github.com/vercel-labs/skills", "vercel-labs", "skills", ""},
 	}
 	for _, tc := range valid {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,6 +328,37 @@ func TestFetchUnknownSkill(t *testing.T) {
 	}
 }
 
+func TestFetchFuzzySkillName(t *testing.T) {
+	// heygen-com/hyperframes has no "hyperframes-animation" directory; the
+	// closest skill lives at skills/hyperframes/SKILL.md.
+	paths := []string{
+		".agents/skills/captions-overlay/SKILL.md",
+		"registry/blocks/canopy-part-title/SKILL.md",
+		"skills/hyperframes/SKILL.md",
+		"skills/slideshow/SKILL.md",
+	}
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/git/trees/HEAD") {
+			io.WriteString(w, treeResponse(paths...))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/HEAD/skills/hyperframes/SKILL.md") {
+			io.WriteString(w, "---\nname: hyperframes\n---\n# HyperFrames\n")
+			return
+		}
+		http.NotFound(w, r)
+	}
+	f := newTestFetcher(t, handler)
+
+	got, err := f.Fetch(context.Background(), "npx skills add https://github.com/heygen-com/hyperframes --skill hyperframes-animation")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got.Path != "skills/hyperframes/SKILL.md" {
+		t.Fatalf("Path = %q, want skills/hyperframes/SKILL.md", got.Path)
+	}
+}
+
 func TestFetchPrefersConventionalPath(t *testing.T) {
 	rawPath := ""
 	handler := func(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +410,7 @@ func TestFetchTreeFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	wantRequests := []string{"SKILL.md", "skills/foo/SKILL.md", ".claude/skills/foo/SKILL.md"}
+	wantRequests := []string{"SKILL.md", "skills/foo/SKILL.md", ".agents/skills/foo/SKILL.md", ".claude/skills/foo/SKILL.md"}
 	if strings.Join(rawRequests, ",") != strings.Join(wantRequests, ",") {
 		t.Fatalf("raw requests = %v, want %v", rawRequests, wantRequests)
 	}

@@ -6,6 +6,7 @@ package skills
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"unicode"
@@ -105,6 +106,14 @@ func BuildFor(db *store.DB, effective []model.Skill, query string) (*Result, err
 	if len(effective) == 0 {
 		return &Result{}, nil
 	}
+	// Priority-aware budget: permanent facts before history. Prompt
+	// instructions first, then memory notes, then retrieval/chat/vision.
+	ordered := make([]model.Skill, len(effective))
+	copy(ordered, effective)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return skillPriority(ordered[i].Type) < skillPriority(ordered[j].Type)
+	})
+	effective = ordered
 	terms := QueryTerms(query)
 	var b strings.Builder
 	var applied []Applied
@@ -137,6 +146,21 @@ func BuildFor(db *store.DB, effective []model.Skill, query string) (*Result, err
 		applied = append(applied, Applied{Skill: s.Name, Kind: s.Type, Detail: detail})
 	}
 	return &Result{Context: strings.TrimSpace(b.String()), Applied: applied}, nil
+}
+
+// skillPriority ranks skill types for budget allocation: prompt (0), memory
+// (1), then retrieval/chat/vision (2). Unknown types go last.
+func skillPriority(t string) int {
+	switch t {
+	case model.SkillPrompt:
+		return 0
+	case model.SkillMemory:
+		return 1
+	case model.SkillRetrieval, model.SkillChat, model.SkillVision:
+		return 2
+	default:
+		return 3
+	}
 }
 
 // Preview renders one skill as it would be injected for a query.
@@ -253,39 +277,98 @@ func hashContent(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// RankItems scores items by term hits in title, source, and body. Ties keep
-// the incoming order (newest first), so fresh notes win over stale ones.
+// RankItems scores items with hybrid BM25 (k1=1.2, b=0.75) over body+title,
+// plus title (+30%) and source (+20%) bonuses, plus a small freshness boost
+// (max +10% by input order, newest first). Ties keep incoming order.
 func RankItems(items []model.SkillItem, terms []string, topK int) []model.SkillItem {
+	const k1 = 1.2
+	const b = 0.75
 	type scored struct {
 		item  model.SkillItem
-		score int
+		score float64
 	}
-	ranked := make([]scored, 0, len(items))
-	for _, it := range items {
+	// Tokenize docs once; df per term; doc lengths (body+title words).
+	docTF := make([]map[string]int, len(items))
+	docLen := make([]int, len(items))
+	df := map[string]int{}
+	lower := make([]struct{ title, source, body string }, len(items))
+	for i, it := range items {
 		title := strings.ToLower(it.Title)
 		source := strings.ToLower(it.Source)
 		body := strings.ToLower(it.Content)
 		if len(body) > 6000 {
 			body = body[:6000]
 		}
-		score := 0
+		lower[i].title, lower[i].source, lower[i].body = title, source, body
+		tf := map[string]int{}
+		joined := title + " " + body
+		for _, w := range tokenizeDoc(joined) {
+			tf[w]++
+		}
+		// Substring fallback keeps old recall ("dashboard" matches
+		// "dashboards", "router" matches "router.go"): if a query term
+		// never appears as a whole token, count substring hits instead.
 		for _, t := range terms {
-			if strings.Contains(title, t) {
-				score += 4
-			}
-			if strings.Contains(source, t) {
-				score += 3
-			}
-			if n := strings.Count(body, t); n > 0 {
-				if n > 5 {
-					n = 5
+			if tf[t] == 0 {
+				if n := strings.Count(joined, t); n > 0 {
+					tf[t] = n
 				}
-				score += n
 			}
 		}
-		if score > 0 {
-			ranked = append(ranked, scored{item: it, score: score})
+		docTF[i] = tf
+		n := 0
+		for _, c := range tf {
+			n += c
 		}
+		docLen[i] = n
+		seen := map[string]bool{}
+		for _, t := range terms {
+			if tf[t] > 0 && !seen[t] {
+				seen[t] = true
+				df[t]++
+			}
+		}
+	}
+	N := float64(len(items))
+	avgLen := 0.0
+	for _, l := range docLen {
+		avgLen += float64(l)
+	}
+	if len(docLen) > 0 {
+		avgLen /= float64(len(docLen))
+	}
+	if avgLen < 1 {
+		avgLen = 1
+	}
+	ranked := make([]scored, 0, len(items))
+	for i, it := range items {
+		score := 0.0
+		for _, t := range terms {
+			tf := float64(docTF[i][t])
+			if tf == 0 {
+				continue
+			}
+			idf := math.Log(1 + (N-float64(df[t])+0.5)/(float64(df[t])+0.5))
+			den := tf + k1*(1-b+b*float64(docLen[i])/avgLen)
+			score += idf * (tf * (k1 + 1) / den)
+		}
+		if score <= 0 {
+			continue
+		}
+		for _, t := range terms {
+			if strings.Contains(lower[i].title, t) {
+				score *= 1.0 + 0.30/float64(len(terms))
+			}
+			if strings.Contains(lower[i].source, t) {
+				score *= 1.0 + 0.20/float64(len(terms))
+			}
+		}
+		// Freshness: input is newest-first; boost up to +10% decaying by rank.
+		if len(items) > 1 {
+			fresh := float64(len(items)-1-i) / float64(len(items)-1)
+			score *= 1 + 0.10*fresh
+		}
+		ranked = append(ranked, scored{item: it, score: score})
 	}
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 	if topK > 0 && len(ranked) > topK {
@@ -296,6 +379,13 @@ func RankItems(items []model.SkillItem, terms []string, topK int) []model.SkillI
 		out[i] = ranked[i].item
 	}
 	return out
+}
+
+// tokenizeDoc splits body+title into lowercase word tokens for BM25.
+func tokenizeDoc(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.')
+	})
 }
 
 // QueryTerms extracts lowercase word tokens used for retrieval. Unicode

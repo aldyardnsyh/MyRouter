@@ -47,7 +47,55 @@ func (s *Syncer) Run(ctx context.Context) {
 	}
 }
 
-// syncDue runs every enabled retrieval skill whose configured interval elapsed.
+// EnsureFreshForRequest syncs retrieval skills inline when they have never
+// been synced, and triggers a background refresh when the configured interval
+// elapsed. It runs at the start of a user request so the flow is:
+// input -> fresh skills -> LLM -> response already backed by skills -> output.
+// Never-synced skills block briefly (one-time cost); due-but-stale skills
+// refresh in the background while the current request uses cached items
+// (fail-open: sync never blocks or fails the user request).
+func EnsureFreshForRequest(db *store.DB, log *logx.Logger, effective []model.Skill) {
+	if log == nil {
+		log = logx.Default()
+	}
+	now := store.Now()
+	for _, sk := range effective {
+		if sk.Type != model.SkillRetrieval {
+			continue
+		}
+		cfg := ParseConfig(sk.Config)
+		if len(cleanSyncPaths(cfg.SyncPaths)) == 0 {
+			continue
+		}
+		last, _, _, stateErr := db.SkillState(sk.ID)
+		if stateErr != nil {
+			continue
+		}
+		if last == 0 {
+			report := SyncSkill(db, sk)
+			log.Info("skill synced on-request (first)",
+				logx.F("skill", sk.Name), logx.F("files", report.Files),
+				logx.F("items", report.Items), logx.F("error", report.Error))
+			continue
+		}
+		if now-last < int64(cfg.SyncIntervalM)*60 {
+			continue
+		}
+		go func(s model.Skill) {
+			report := SyncSkill(db, s)
+			l := log.Info
+			if report.Error != "" {
+				l = log.Warn
+			}
+			l("skill synced on-request (background)",
+				logx.F("skill", s.Name), logx.F("files", report.Files),
+				logx.F("items", report.Items), logx.F("error", report.Error))
+		}(sk)
+		// Mark state now so concurrent requests don't spawn duplicate syncs;
+		// the background run overwrites with the real result.
+		_ = db.SetSkillState(sk.ID, now, "", 0)
+	}
+}
 func (s *Syncer) syncDue(ctx context.Context) {
 	list, err := s.db.ListEnabledSkills()
 	if err != nil {

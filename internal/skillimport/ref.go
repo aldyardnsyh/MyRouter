@@ -51,10 +51,68 @@ var allowedRedirectHosts = map[string]bool{
 // Trailing slashes, query strings and fragments are ignored. An empty skill
 // means "resolve the repository's only SKILL.md". The skill slug is the last
 // path segment of a GitHub tree link.
+// parseNpxSkillsAdd extracts a skill reference from the `npx skills add ...`
+// command form commonly pasted from READMEs, e.g.
+// `npx skills add https://github.com/vercel-labs/skills --skill find-skills`.
+// It returns the plain reference (URL + optional skill) for normal parsing.
+func parseNpxSkillsAdd(input string) (string, bool) {
+	tokens := strings.Fields(input)
+	if len(tokens) < 3 {
+		return "", false
+	}
+	if tokens[0] != "npx" || tokens[1] != "skills" || tokens[2] != "add" {
+		return "", false
+	}
+	rest := tokens[3:]
+	var urlRef, skillFlag string
+	for i := 0; i < len(rest); i++ {
+		tok := rest[i]
+		if tok == "--skill" && i+1 < len(rest) {
+			skillFlag = rest[i+1]
+			i++
+			continue
+		}
+		if strings.HasPrefix(tok, "-") {
+			// Skip other flags and their values.
+			continue
+		}
+		if urlRef == "" {
+			urlRef = tok
+		}
+	}
+	urlRef = strings.Trim(urlRef, `"'`)
+	skillFlag = strings.Trim(skillFlag, `"'`)
+	if urlRef == "" {
+		return "", false
+	}
+	if skillFlag != "" && !strings.Contains(urlRef, "://") {
+		// Shorthand repo + explicit skill flag.
+		return strings.Trim(urlRef, "/") + "/" + skillFlag, true
+	}
+	if skillFlag != "" {
+		// URL + skill flag: append the skill as a query marker the URL
+		// parser can pick up via fragment fallback below.
+		sep := "#skill="
+		// Avoid double skill markers.
+		if strings.Contains(urlRef, "#skill=") {
+			return urlRef, true
+		}
+		return urlRef + sep + url.QueryEscape(skillFlag), true
+	}
+	return urlRef, true
+}
+
 func ParseRef(ref string) (owner, repo, skill string, err error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", "", "", fmt.Errorf("skillimport: empty skill reference")
+	}
+	// Accept the `npx skills add <url> --skill <name>` command form pasted
+	// from skill READMEs: extract the URL and the --skill flag value.
+	if extracted, ok := parseNpxSkillsAdd(ref); ok {
+		ref = extracted
+		// Re-enter with the extracted plain reference.
+		return ParseRef(ref)
 	}
 	if strings.Contains(ref, "://") {
 		return parseURLRef(ref)
@@ -92,9 +150,29 @@ func parseURLRef(ref string) (string, string, string, error) {
 	if !directRefHosts[host] {
 		return "", "", "", fmt.Errorf("skillimport: unsupported host %q: allowed hosts are skills.sh, www.skills.sh and github.com", host)
 	}
+	// Fragment fallback for the npx command form:
+	// `...github.com/owner/repo#skill=name` carries the --skill flag value.
+	fragSkill := ""
+	if frag := strings.TrimSpace(u.Fragment); frag != "" {
+		if strings.HasPrefix(frag, "skill=") {
+			if decoded, err := url.QueryUnescape(strings.TrimPrefix(frag, "skill=")); err == nil {
+				fragSkill = strings.TrimSpace(decoded)
+			}
+		}
+	}
 	segments := splitRefPath(u.Path)
 	if host == "github.com" {
-		return parseGitHubPath(segments, ref)
+		owner, repo, skill, err := parseGitHubPath(segments, ref)
+		if err != nil {
+			return "", "", "", err
+		}
+		if skill == "" && fragSkill != "" {
+			if err := validateRefPart("skill", fragSkill); err != nil {
+				return "", "", "", err
+			}
+			skill = fragSkill
+		}
+		return owner, repo, skill, nil
 	}
 	return parseSkillsShPath(segments, ref)
 }

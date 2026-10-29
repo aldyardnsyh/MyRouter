@@ -59,6 +59,15 @@ func (g *Gateway) applySkills(ctx context.Context, prep *PreparedRequest) *skill
 		return rt
 	}
 
+	// On-request sync: retrieval skills with sync_paths refresh from disk as
+	// part of the request flow (first sync blocks once, later ones refresh in
+	// the background). Fail-open: never blocks or fails the user request.
+	skills.EnsureFreshForRequest(g.db, g.log, effective)
+	// Re-resolve after a possible first sync so fresh items are visible.
+	if refreshed, err := g.db.EffectiveSkills(prep.Route.Alias); err == nil && len(refreshed) > 0 {
+		effective = refreshed
+	}
+
 	var parts []string
 	var names []string
 	// Vision bridge first: it rewrites the messages (images -> descriptions)

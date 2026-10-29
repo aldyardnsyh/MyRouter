@@ -256,6 +256,14 @@ func selectSkillPath(paths []string, skill, owner, repo string) (string, error) 
 		})
 		return matches[0], nil
 	}
+	// Fuzzy fallback: the requested name may differ from the directory name
+	// (e.g. "hyperframes-animation" vs "hyperframes"). Score candidates by
+	// token overlap between the requested skill and each path segment, and
+	// prefer conventional skill roots (skills/, .agents/skills/,
+	// .claude/skills/) over nested registry copies.
+	if best := fuzzySkillPath(candidates, skill); best != "" {
+		return best, nil
+	}
 	sort.Strings(candidates)
 	return "", fmt.Errorf(
 		"skillimport: no SKILL.md for skill %q in %s/%s (candidates: %s)",
@@ -278,6 +286,89 @@ func hasSkillDirSegment(path, skill string) bool {
 	return strings.HasSuffix(strings.ToLower(path), "/"+strings.ToLower(skill)+"/skill.md")
 }
 
+// skillRootBonus ranks conventional skill roots above nested copies: a match
+// in skills/ beats the same name under .agents/skills/, which beats a
+// registry/blocks/ copy.
+func skillRootBonus(path string) int {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasPrefix(lower, "skills/"):
+		return 30
+	case strings.HasPrefix(lower, ".agents/skills/"),
+		strings.HasPrefix(lower, ".claude/skills/"):
+		return 20
+	case strings.Contains(lower, "/skills/"):
+		return 10
+	default:
+		return 0
+	}
+}
+
+// fuzzySkillPath scores candidates by token overlap between the requested
+// skill name and each path segment. "hyperframes-animation" therefore matches
+// "skills/hyperframes/SKILL.md" (shared token "hyperframes") even though the
+// directory name differs. Returns "" when nothing shares a token.
+func fuzzySkillPath(candidates []string, skill string) string {
+	want := skillTokens(skill)
+	if len(want) == 0 {
+		return ""
+	}
+	best := ""
+	bestScore := 0
+	for _, path := range candidates {
+		score := 0
+		for _, seg := range strings.Split(strings.ToLower(path), "/") {
+			if seg == "" || seg == "skill.md" {
+				continue
+			}
+			have := skillTokens(seg)
+			overlap := 0
+			for t := range want {
+				if have[t] {
+					overlap++
+				}
+			}
+			if overlap == 0 {
+				continue
+			}
+			// Longer shared tokens weigh more than short generic ones.
+			segScore := overlap * 10
+			for t := range want {
+				if have[t] && len(t) >= 5 {
+					segScore += len(t)
+				}
+			}
+			score += segScore
+		}
+		if score == 0 {
+			continue
+		}
+		score += skillRootBonus(path)
+		// Shorter paths win ties: skills/hyperframes beats
+		// registry/blocks/hyperframes-animation-copy.
+		score -= len(path) / 20
+		if score > bestScore {
+			best, bestScore = path, score
+		}
+	}
+	return best
+}
+
+// skillTokens splits a name into lowercase alphanumeric tokens, dropping
+// generic filler words that would match everything.
+func skillTokens(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, t := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	}) {
+		if len(t) < 3 || t == "skill" || t == "skills" || t == "the" {
+			continue
+		}
+		out[t] = true
+	}
+	return out
+}
+
 func ambiguousSkillPathError(owner, repo string, candidates []string) error {
 	shown := candidates
 	if len(shown) > 5 {
@@ -298,6 +389,7 @@ func fallbackSkillPaths(skill string) []string {
 	return []string{
 		"SKILL.md",
 		"skills/" + skill + "/SKILL.md",
+		".agents/skills/" + skill + "/SKILL.md",
 		".claude/skills/" + skill + "/SKILL.md",
 		skill + "/SKILL.md",
 	}

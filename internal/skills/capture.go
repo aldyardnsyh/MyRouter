@@ -36,7 +36,13 @@ func Capture(db *store.DB, s model.Skill, routeAlias, question, answer string) e
 	if err := db.CreateSkillItem(item); err != nil {
 		return err
 	}
-	return db.TrimSkillItems(s.ID, "note", cfg.CaptureKeep)
+	if err := db.TrimSkillItems(s.ID, "note", cfg.CaptureKeep); err != nil {
+		return err
+	}
+	// Complementary skill: repeated imperative preferences in chat auto-promote
+	// to permanent memory (best-effort, never fails the capture).
+	maybePromoteToMemory(db, s, routeAlias, question)
+	return nil
 }
 
 // firstLine returns the first non-empty line of s, truncated to max runes.

@@ -139,6 +139,23 @@ func TestSkillsCRUDBindingsAndPreview(t *testing.T) {
 	if itemsBody.Data.Total != 1 || len(itemsBody.Data.Items) != 1 {
 		t.Fatalf("expected one matching item, got %+v", itemsBody.Data)
 	}
+	// Unfiltered list includes 2 retrieval starter docs + the manual item.
+	rec = a.authedDo(t, http.MethodGet, "/admin/skills/"+created.ID+"/items", session, csrf, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list all items: got %d: %s", rec.Code, rec.Body.String())
+	}
+	var allBody struct {
+		Data struct {
+			Items []model.SkillItem `json:"items"`
+			Total int               `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &allBody); err != nil {
+		t.Fatal(err)
+	}
+	if allBody.Data.Total != 3 {
+		t.Fatalf("expected 2 starter + 1 manual item, got %+v", allBody.Data)
+	}
 
 	// Preview shows the injected context and the applied skill list.
 	rec = a.authedDo(t, http.MethodGet, "/admin/skills/"+created.ID+"/preview?q=deploy+caddy", session, csrf, nil)
@@ -149,12 +166,12 @@ func TestSkillsCRUDBindingsAndPreview(t *testing.T) {
 		t.Fatalf("preview missing knowledge: %s", rec.Body.String())
 	}
 
-	// Sync on a skill without paths reports an error instead of failing the call.
+	// Sync on a skill with default sync_paths reports no matching files.
 	rec = a.authedDo(t, http.MethodPost, "/admin/skills/"+created.ID+"/sync", session, csrf, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sync: got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "no sync_paths configured") {
+	if !strings.Contains(rec.Body.String(), "no files matched") {
 		t.Fatalf("unexpected sync report: %s", rec.Body.String())
 	}
 

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/myrouter/myrouter/internal/model"
+	"github.com/myrouter/myrouter/internal/skillimport"
 	"github.com/myrouter/myrouter/internal/skills"
 	"github.com/myrouter/myrouter/internal/store"
 )
@@ -127,6 +128,13 @@ func (s *Server) handleCreateSkill(w http.ResponseWriter, r *http.Request, _ *au
 	if err := s.db.CreateSkill(sk); err != nil {
 		writeErr(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
+	}
+	// Seed type-specific defaults (prompt + starter items); never overwrites
+	// user-supplied config. Best-effort: skill already exists without them.
+	if err := skills.SeedDefaults(s.db, sk); err == nil {
+		if saved2, err := s.db.SkillByID(sk.ID); err == nil {
+			sk = saved2
+		}
 	}
 	saved, _ := s.db.SkillByID(sk.ID)
 	writeJSON(w, http.StatusCreated, map[string]any{"data": toSkillDTO(*saved)})
@@ -425,17 +433,28 @@ func (s *Server) handleImportSkill(w http.ResponseWriter, r *http.Request, _ *au
 		desc = "Imported from " + imported.SourceURL
 	}
 	desc = skills.Truncate(desc, 500)
+	cap := skillimport.InferCapability(imported.Content)
+	if desc == "" || desc == "Imported from "+imported.SourceURL {
+		if cap.Summary != "" {
+			desc = skills.Truncate(cap.Summary, 500)
+		}
+	}
 	content := imported.Content
 	if len(content) > 48000 {
 		content = truncateUTF8Bytes(content, 48000)
 	}
+	prompt := cap.Prompt
+	if strings.TrimSpace(prompt) == "" {
+		prompt = content
+	}
 	cfg, err := encodeSkillConfig(map[string]any{
-		"prompt":     content,
+		"prompt":     prompt,
 		"max_chars":  8000,
 		"source_url": imported.SourceURL,
 		"origin":     "skills.sh",
 		"repo":       imported.Owner + "/" + imported.Repo,
 		"path":       imported.Path,
+		"capability": cap.Summary,
 	})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_input", err.Error())
@@ -443,12 +462,26 @@ func (s *Server) handleImportSkill(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	sk := &model.Skill{
 		ID: store.NewID("skl"), Name: name, Description: desc,
-		Type: model.SkillPrompt, Enabled: true, Config: cfg, CreatedAt: store.Now(),
+		Type: cap.Type, Enabled: true, Config: cfg, CreatedAt: store.Now(),
+	}
+	if !model.ValidSkillType(sk.Type) {
+		sk.Type = model.SkillPrompt
 	}
 	if err := s.db.CreateSkill(sk); err != nil {
 		writeErr(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
 	}
+	// Seed the imported SKILL.md as the first knowledge item so the skill
+	// injects immediately (will_inject=true) for memory/retrieval/chat types.
+	kind := "note"
+	if sk.Type == model.SkillRetrieval {
+		kind = "doc"
+	}
+	_ = s.db.CreateSkillItem(&model.SkillItem{
+		ID: store.NewID("ski"), SkillID: sk.ID, Kind: kind,
+		Source: imported.SourceURL, Title: "SKILL.md",
+		Content: content, CreatedAt: store.Now(),
+	})
 	bindGlobal := true
 	if req.BindGlobal != nil {
 		bindGlobal = *req.BindGlobal
