@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: Go vet + tests (serial, linker-safe)
+        run: go test -count=1 -p 1 ./...
+  web:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web build
+        run: npm --prefix web ci --no-audit --no-fund
+        # build needs devDeps; run separately so failures are distinct
+      - name: Web build assets
+        run: npm --prefix web run build
+
+  release:
+    needs: [test, web]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build desktop binary
+        shell: pwsh
+        run: |
+          npm --prefix web ci --no-audit --no-fund
+          .\scripts\build-windows.ps1 -Gui -NoDesktopShortcut
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          files: dist/MyRouter.exe
+          generate_release_notes: true

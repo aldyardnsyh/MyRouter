@@ -28,15 +28,20 @@ function statusColor(status: string) {
   }
 }
 
-interface Node { p: Provider; angle: number; radius: number; x: number; y: number; count: number }
+interface Node { p: Provider; angle: number; orbitSpeed: number; radius: number; x: number; y: number; count: number; pop: number }
 interface Particle { id: string; nodeIdx: number; t: number; speed: number; status: string; wobble: number }
 interface Spark { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string }
-interface Dust { x: number; y: number; vx: number; vy: number; r: number }
+interface Ripple { x: number; y: number; r: number; max: number; color: string }
+interface Dust { x: number; y: number; vx: number; vy: number; r: number; depth: number; tw: number }
+interface Star { x: number; y: number; r: number; phase: number }
 
 const liveStyle = `
-@keyframes mrl-recent-in { from { transform: translateX(-8px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-.mrl-recent-first { animation: mrl-recent-in 250ms ease-out; }
-@media (prefers-reduced-motion: reduce) { .mrl-recent-first { animation: none; } }`;
+@keyframes mrl-recent-in { from { transform: translateX(-14px); opacity: 0; } 60% { transform: translateX(2px); opacity: 1; } to { transform: translateX(0); opacity: 1; } }
+.mrl-recent-item { animation: mrl-recent-in 300ms cubic-bezier(.2,.9,.3,1.2) backwards; }
+@keyframes mrl-dot-pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.6); opacity: .6; } }
+.mrl-dot-hot { animation: mrl-dot-pulse 1.2s ease-in-out infinite; }
+@keyframes mrl-flash { 0% { opacity: .9; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .mrl-recent-item, .mrl-dot-hot { animation: none; } }`;
 
 export function LiveRoutingCard({ providers, live }: Props) {
   const active = live?.active ?? [];
@@ -75,15 +80,20 @@ export function LiveRoutingCard({ providers, live }: Props) {
   const nodesRef = useRef<Node[]>([]);
   const partsRef = useRef<Particle[]>([]);
   const sparksRef = useRef<Spark[]>([]);
+  const ripplesRef = useRef<Ripple[]>([]);
   const dustRef = useRef<Dust[]>([]);
+  const starsRef = useRef<Star[]>([]);
+  const flashRef = useRef(0);
+  const countRef = useRef(0);
   const prevRecentRef = useRef<string>('');
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
 
-  // Init nodes layout (orbit angles evenly, radius by status)
+  // Init nodes layout (orbit angles evenly, radius by status, speed per index)
   const layout = useMemo(() => nodes0.map((p, i) => ({
     p,
     angle: (i / Math.max(1, nodes0.length)) * Math.PI * 2 - Math.PI / 2,
+    orbitSpeed: 0.00012 + (i % 3) * 0.00006,
     count: activeByProvider.get(p.id) ?? 0,
   })), [nodes0, activeByProvider]);
 
@@ -97,7 +107,7 @@ export function LiveRoutingCard({ providers, live }: Props) {
     });
   }, [active, nodes0]);
 
-  // Burst on new successful recent
+  // Burst + ripple + flash on new successful recent
   useEffect(() => {
     const first = recent[0];
     if (!first || first.status !== 'ok') { prevRecentRef.current = first?.request_id ?? ''; return; }
@@ -105,11 +115,14 @@ export function LiveRoutingCard({ providers, live }: Props) {
       const ni = nodes0.findIndex((n) => n.id === first.provider_id);
       if (ni >= 0 && nodesRef.current[ni]) {
         const { x, y } = nodesRef.current[ni];
-        const n = 8 + Math.floor(Math.random() * 5);
+        nodesRef.current[ni].pop = 1;
+        flashRef.current = 1;
+        ripplesRef.current.push({ x, y, r: 6, max: 44, color: 'rgb(var(--c-success))' });
+        const n = 10 + Math.floor(Math.random() * 5);
         for (let k = 0; k < n; k++) {
           const a = (k / n) * Math.PI * 2 + Math.random() * 0.4;
-          const sp = 0.6 + Math.random() * 1.4;
-          sparksRef.current.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0, max: 24, color: 'rgb(var(--c-success))' });
+          const sp = 0.6 + Math.random() * 1.6;
+          sparksRef.current.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0, max: 26, color: 'rgb(var(--c-success))' });
         }
       }
     }
@@ -133,31 +146,44 @@ export function LiveRoutingCard({ providers, live }: Props) {
     const baseR = Math.min(size.w, size.h) * 0.36;
 
     if (dustRef.current.length === 0) {
-      for (let i = 0; i < 40; i++) dustRef.current.push({ x: Math.random() * size.w, y: Math.random() * size.h, vx: (Math.random() - 0.5) * 0.15, vy: (Math.random() - 0.5) * 0.15, r: 0.6 + Math.random() * 1.2 });
+      for (let i = 0; i < 46; i++) dustRef.current.push({ x: Math.random() * size.w, y: Math.random() * size.h, vx: (Math.random() - 0.5) * 0.22, vy: (Math.random() - 0.5) * 0.22, r: 0.6 + Math.random() * 1.2, depth: i % 2 === 0 ? 0.5 : 1, tw: Math.random() * 6.28 });
+    }
+    if (starsRef.current.length === 0) {
+      for (let i = 0; i < 26; i++) starsRef.current.push({ x: Math.random() * size.w, y: Math.random() * size.h, r: 0.8 + Math.random() * 1.1, phase: Math.random() * 6.28 });
     }
 
     const css = (v: string) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
     const col = (v: string, fb: string) => { const c = css(v); return c ? `rgb(${c})` : fb; };
 
     const drawFrame = (time: number) => {
-      // node positions
+      // node positions — satellites ORBIT the core (angle advances per node)
       nodesRef.current = layout.map((L) => {
         const far = L.p.status !== 'connected';
         const r = far ? baseR + 34 : baseR - 14 + (L.count > 0 ? -6 : 0);
-        const drift = reducedMotion ? 0 : time * 0.00006 * (far ? 1 : -1);
-        const a = L.angle + drift;
-        return { p: L.p, angle: a, radius: r, x: cx + Math.cos(a) * r * 1.35, y: cy + Math.sin(a) * r * 0.72, count: L.count };
+        const a = L.angle + (reducedMotion ? 0 : time * L.orbitSpeed);
+        const prev = nodesRef.current.find((n) => n.p.id === L.p.id);
+        return { p: L.p, angle: a, orbitSpeed: L.orbitSpeed, radius: r, x: cx + Math.cos(a) * r * 1.35, y: cy + Math.sin(a) * r * 0.72, count: L.count, pop: Math.max(0, (prev?.pop ?? 0) - 0.04) };
       });
 
       ctx.clearRect(0, 0, size.w, size.h);
-      // bg dots (subtle, static)
-      ctx.fillStyle = col('--c-border', '#e5e5e5');
-      ctx.globalAlpha = 0.35;
-      for (let gx = 8; gx < size.w; gx += 22) for (let gy = 8; gy < size.h; gy += 22) { ctx.fillRect(gx, gy, 1, 1); }
-      ctx.globalAlpha = 1;
+      // twinkling starfield background
+      if (!reducedMotion) {
+        ctx.fillStyle = col('--c-muted', '#999');
+        for (const s of starsRef.current) {
+          ctx.globalAlpha = 0.12 + 0.12 * Math.sin(time * 0.001 + s.phase);
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillStyle = col('--c-border', '#e5e5e5');
+        ctx.globalAlpha = 0.35;
+        for (let gx = 8; gx < size.w; gx += 22) for (let gy = 8; gy < size.h; gy += 22) { ctx.fillRect(gx, gy, 1, 1); }
+        ctx.globalAlpha = 1;
+      }
 
-      const breathe = reducedMotion ? 0 : Math.sin(time * 0.0016);
-      const coreR = 26 + breathe * 2.5;
+      const load = Math.min(1, active.length / 4);
+      const breathe = reducedMotion ? 0 : Math.sin(time * (0.0016 + load * 0.002));
+      const coreR = 26 + breathe * (2.5 + load * 3);
 
       // orbit rings (2, opposite directions) — accent at low alpha, matte
       const rings = [
@@ -178,20 +204,30 @@ export function LiveRoutingCard({ providers, live }: Props) {
         ctx.globalAlpha = 1;
       }
 
-      // edges core -> node (selected highlighted, hot accent, idle faint)
+      // edges core -> node: curved bezier following node motion, dash-flow
+      const dashOff = reducedMotion ? 0 : -time * 0.02;
       for (const n of nodesRef.current) {
         const isSel = selectedRef.current === n.p.id;
         const hot = n.count > 0;
         ctx.strokeStyle = isSel || hot ? col('--c-accent', '#6366f1') : col('--c-border', '#ccc');
-        ctx.globalAlpha = isSel ? 0.9 : hot ? 0.55 : 0.4;
-        ctx.lineWidth = isSel ? 1.8 : 1.1;
-        ctx.setLineDash(hot || isSel ? [3, 7] : [3, 5]);
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.quadraticCurveTo(cx, n.y, n.x, n.y); ctx.stroke();
+        ctx.globalAlpha = isSel ? 0.9 : hot ? 0.6 : 0.35;
+        ctx.lineWidth = isSel ? 1.8 : hot ? 1.4 : 1.1;
+        ctx.setLineDash(hot || isSel ? [4, 6] : [3, 5]);
+        ctx.lineDashOffset = dashOff;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.quadraticCurveTo(cx + (n.x - cx) * 0.15, cy + (n.y - cy) * 0.85, n.x, n.y); ctx.stroke();
         ctx.setLineDash([]);
         ctx.globalAlpha = 1;
       }
 
-      // core: solid accent disc + ring (single glow element only)
+      // core: solid accent disc + ring (single glow element only) + success flash
+      if (flashRef.current > 0) {
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, flashRef.current) * 0.5;
+        ctx.fillStyle = col('--c-success', '#22c55e');
+        ctx.beginPath(); ctx.arc(cx, cy, coreR * 1.5, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+        if (!reducedMotion) flashRef.current -= 0.06;
+      }
       ctx.save();
       ctx.shadowColor = col('--c-accent', '#6366f1');
       ctx.shadowBlur = 18;
@@ -249,13 +285,25 @@ export function LiveRoutingCard({ providers, live }: Props) {
         ctx.globalAlpha = 1;
       }
 
-      // nodes (satellites)
+      // ripples (expanding rings on success arrival)
+      ripplesRef.current = ripplesRef.current.filter((rp) => rp.r < rp.max);
+      for (const rp of ripplesRef.current) {
+        if (!reducedMotion) rp.r += 1.6;
+        ctx.globalAlpha = Math.max(0, 0.6 * (1 - rp.r / rp.max));
+        ctx.strokeStyle = rp.color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      // nodes (satellites) with pop bounce on new traffic
       for (const n of nodesRef.current) {
         const isSel = selectedRef.current === n.p.id;
+        const popScale = 1 + n.pop * 0.12;
         ctx.fillStyle = col('--c-bg', '#fff');
         ctx.strokeStyle = isSel || n.count > 0 ? col('--c-accent', '#6366f1') : col('--c-border', '#ccc');
         ctx.lineWidth = isSel ? 2 : 1.2;
-        const w = 118, h = 34;
+        const w = 118 * popScale, h = 34 * popScale;
         ctx.beginPath();
         if (typeof ctx.roundRect === 'function') ctx.roundRect(n.x - w / 2, n.y - h / 2, w, h, 8); else ctx.rect(n.x - w / 2, n.y - h / 2, w, h);
         ctx.fill(); ctx.stroke();
@@ -278,18 +326,21 @@ export function LiveRoutingCard({ providers, live }: Props) {
         }
       }
 
-      // ambient dust
+      // ambient dust — 2 layers parallax (near fast, far slow)
       if (!reducedMotion) {
         ctx.fillStyle = col('--c-muted', '#999');
         for (const d of dustRef.current) {
-          d.x += d.vx; d.y += d.vy;
+          d.x += d.vx * d.depth; d.y += d.vy * d.depth;
           if (d.x < 0) d.x = size.w; if (d.x > size.w) d.x = 0;
           if (d.y < 0) d.y = size.h; if (d.y > size.h) d.y = 0;
-          ctx.globalAlpha = 0.25;
-          ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill();
+          ctx.globalAlpha = 0.14 + 0.14 * d.depth + 0.06 * Math.sin(time * 0.002 + d.tw);
+          ctx.beginPath(); ctx.arc(d.x, d.y, d.r * d.depth, 0, Math.PI * 2); ctx.fill();
         }
         ctx.globalAlpha = 1;
       }
+      // smooth count-up for in-flight badge
+      countRef.current += (active.length - countRef.current) * (reducedMotion ? 1 : 0.2);
+      if (Math.abs(active.length - countRef.current) < 0.05) countRef.current = active.length;
     };
 
     if (reducedMotion) {
@@ -368,16 +419,16 @@ export function LiveRoutingCard({ providers, live }: Props) {
         ) : (
           <ul className="divide-y divide-border">
             {recent.slice(0, 5).map((r: LiveRequest, ri: number) => (
-              <li key={r.request_id} className={ri === 0 ? 'mrl-recent-first flex items-center justify-between gap-3 px-4 py-2 text-[12px]' : 'flex items-center justify-between gap-3 px-4 py-2 text-[12px]'}>
+              <li key={r.request_id} className="mrl-recent-item flex items-center justify-between gap-3 px-4 py-2 text-[12px]" style={{ animationDelay: `${ri * 40}ms` }}>
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: statusColor(r.status) }} />
+                  <span className={classNames('h-1.5 w-1.5 shrink-0 rounded-full', r.status === 'ok' && 'mrl-dot-hot')} style={{ background: statusColor(r.status) }} />
                   <span className="truncate font-mono text-[11.5px] text-text">{r.route}</span>
                   <span className="text-muted">→</span>
                   <span className="truncate text-text">{r.provider_name || '—'}</span>
                 </div>
                 <div className="flex shrink-0 items-center gap-3 font-mono text-[10.5px] text-muted">
                   <span>{r.key_prefix || '—'}</span>
-                  <span>{r.elapsed_ms}ms</span>
+                  <span>{r.elapsed_ms >= 1000 ? `${(r.elapsed_ms / 1000).toFixed(1)}s` : `${r.elapsed_ms}ms`}</span>
                 </div>
               </li>
             ))}
