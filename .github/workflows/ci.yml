@@ -16,6 +16,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build web assets (required for go:embed)
+        run: |
+          npm --prefix web ci --no-audit --no-fund
+          npm --prefix web run build
       - name: Go vet + tests (serial, linker-safe)
         run: go test -count=1 -p 1 ./...
   web:
