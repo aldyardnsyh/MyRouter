@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,24 @@ func runChat(t *testing.T, g *Gateway, keySecret string) *Outcome {
 }
 
 func prep_now() time.Time { return time.Now() }
+
+func TestContextExceededMessage(t *testing.T) {
+	if got := contextExceededMessage(100, 100, 128000); got != "" {
+		t.Fatalf("fits must return empty, got %q", got)
+	}
+	got := contextExceededMessage(127000, 5000, 128000)
+	if got == "" {
+		t.Fatal("overflow must return a message")
+	}
+	for _, want := range []string{"context exceeded", "127000", "128000"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("message %q must contain %q", got, want)
+		}
+	}
+	if got := contextExceededMessage(10, 10, 0); got != "" {
+		t.Fatalf("unknown window must not block, got %q", got)
+	}
+}
 
 func TestFallbackOn429(t *testing.T) {
 	g, _, _ := newTestGateway(t, "429", "ok")

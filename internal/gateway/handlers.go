@@ -139,10 +139,21 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		EstTokens: EstimateTokens(input.Messages) + 256, Started: started,
 	}
 
+	// Fail fast when the request cannot fit the primary model's context window.
+	// EstTokens is a coarse len/4 estimate, so this is a pre-flight guard only:
+	// it prevents a mysterious mid-stream "out of context" death by returning
+	// a clear 400 with the remaining budget before any upstream call.
 	// Guard evaluation against the primary provider scope first.
 	var primaryProv *model.Provider
 	if pt, ok := route.Primary(); ok {
 		primaryProv, _ = g.db.ProviderByID(pt.ProviderID)
+		if mdl, err := g.db.ModelByID(pt.ModelID); err == nil && mdl != nil && mdl.ContextWindow > 0 {
+			if msg := contextExceededMessage(prep.EstTokens, input.MaxTokens, mdl.ContextWindow); msg != "" {
+				g.logActivity(requestID, started, r, auth, route, primaryProv, mdl, "blocked", http.StatusBadRequest, 0, 0, 0, "", "", msg, nil)
+				WriteOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "context_exceeded", msg, 0)
+				return
+			}
+		}
 	}
 	guardCtx := context.WithValue(r.Context(), struct{}{}, true)
 	decision := g.guard.Check(guardCtx, prep.GuardRequest(primaryProv))
