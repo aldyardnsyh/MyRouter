@@ -45,6 +45,19 @@ func (db *DB) migrate() error {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	// Adaptive reasoning budget (Adaptive Dual Reasoner): per-route effort
+	// column. ALTER is idempotent via PRAGMA check so existing DBs upgrade.
+	var hasEffort int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('route') WHERE name='effort'`).Scan(&hasEffort)
+	if hasEffort == 0 {
+		if _, err := db.Exec(`ALTER TABLE route ADD COLUMN effort TEXT NOT NULL DEFAULT 'medium'`); err != nil {
+			return fmt.Errorf("add route.effort: %w", err)
+		}
+	}
+	// Normalize legacy/empty values.
+	if _, err := db.Exec(`UPDATE route SET effort='medium' WHERE effort IS NULL OR TRIM(effort)='' OR LOWER(effort) NOT IN ('low','medium','high')`); err != nil {
+		return fmt.Errorf("normalize route.effort: %w", err)
+	}
 	// Self-heal routes orphaned by older builds: DeleteProvider used to leave
 	// the route row behind after its targets cascaded away. Those rows can
 	// never serve traffic and used to surface as "routes hidden because their

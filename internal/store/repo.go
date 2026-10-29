@@ -352,7 +352,7 @@ func repeat(s string, n int) string {
 // presented as "disabled", which would suggest they can be re-enabled.
 func (db *DB) ListRoutes() ([]model.Route, error) {
 	rows, err := db.Query(`SELECT r.id, r.alias, r.description, r.enabled, r.strategy, r.retry, r.timeout_ms,
-		r.policy_id, COALESCE(p.name,''), r.fallback_on, r.created_at
+		r.effort, r.policy_id, COALESCE(p.name,''), r.fallback_on, r.created_at
 		FROM route r LEFT JOIN policy p ON p.id = r.policy_id
 		WHERE EXISTS (SELECT 1 FROM route_target t WHERE t.route_id = r.id)
 		ORDER BY r.created_at ASC`)
@@ -366,7 +366,7 @@ func (db *DB) ListRoutes() ([]model.Route, error) {
 	for rows.Next() {
 		var r model.Route
 		if err := rows.Scan(&r.ID, &r.Alias, &r.Description, &r.Enabled, &r.Strategy, &r.Retry, &r.TimeoutMS,
-			&r.PolicyID, &r.PolicyName, &r.FallbackOn, &r.CreatedAt); err != nil {
+			&r.Effort, &r.PolicyID, &r.PolicyName, &r.FallbackOn, &r.CreatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -412,9 +412,9 @@ func (db *DB) routeTargets(routeID string) ([]model.RouteTarget, error) {
 func (db *DB) RouteByAlias(alias string) (*model.Route, error) {
 	var r model.Route
 	err := db.QueryRow(`SELECT r.id, r.alias, r.description, r.enabled, r.strategy, r.retry, r.timeout_ms,
-		r.policy_id, COALESCE(p.name,''), r.fallback_on, r.created_at
+		r.effort, r.policy_id, COALESCE(p.name,''), r.fallback_on, r.created_at
 		FROM route r LEFT JOIN policy p ON p.id = r.policy_id WHERE LOWER(r.alias) = LOWER(?)`, alias).
-		Scan(&r.ID, &r.Alias, &r.Description, &r.Enabled, &r.Strategy, &r.Retry, &r.TimeoutMS, &r.PolicyID, &r.PolicyName, &r.FallbackOn, &r.CreatedAt)
+		Scan(&r.ID, &r.Alias, &r.Description, &r.Enabled, &r.Strategy, &r.Retry, &r.TimeoutMS, &r.Effort, &r.PolicyID, &r.PolicyName, &r.FallbackOn, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -437,6 +437,16 @@ func (db *DB) RouteByID(id string) (*model.Route, error) {
 	return db.RouteByAlias(alias)
 }
 
+// normalizeEffort defaults the adaptive reasoning budget to medium.
+func normalizeEffort(e string) string {
+	switch e {
+	case "low", "medium", "high":
+		return e
+	default:
+		return "medium"
+	}
+}
+
 // SaveRoute inserts or updates a route and replaces its targets atomically.
 func (db *DB) SaveRoute(r *model.Route) error {
 	tx, err := db.Begin()
@@ -457,11 +467,11 @@ func (db *DB) SaveRoute(r *model.Route) error {
 	}
 	if r.ID == "" {
 		r.ID = NewID("rt")
-		_, err = tx.Exec(`INSERT INTO route (id, alias, description, enabled, strategy, retry, timeout_ms, policy_id, fallback_on, created_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?)`, r.ID, r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, policyID, r.FallbackOn, r.CreatedAt)
+		_, err = tx.Exec(`INSERT INTO route (id, alias, description, enabled, strategy, retry, timeout_ms, effort, policy_id, fallback_on, created_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, normalizeEffort(r.Effort), policyID, r.FallbackOn, r.CreatedAt)
 	} else {
-		_, err = tx.Exec(`UPDATE route SET alias=?, description=?, enabled=?, strategy=?, retry=?, timeout_ms=?, policy_id=?, fallback_on=? WHERE id=?`,
-			r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, policyID, r.FallbackOn, r.ID)
+		_, err = tx.Exec(`UPDATE route SET alias=?, description=?, enabled=?, strategy=?, retry=?, timeout_ms=?, effort=?, policy_id=?, fallback_on=? WHERE id=?`,
+			r.Alias, r.Description, boolToInt(r.Enabled), r.Strategy, r.Retry, r.TimeoutMS, normalizeEffort(r.Effort), policyID, r.FallbackOn, r.ID)
 	}
 	if err != nil {
 		return err

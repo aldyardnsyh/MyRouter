@@ -92,6 +92,8 @@ type Route struct {
 	Strategy    string        `json:"strategy"`
 	Retry       int           `json:"retry"`
 	TimeoutMS   int           `json:"timeout_ms"`
+	// Effort is the adaptive reasoning budget: low|medium|high (default medium).
+	Effort      string        `json:"effort"`
 	PolicyID    *string       `json:"policy_id"`
 	PolicyName  string        `json:"policy_name,omitempty"`
 	FallbackOn  string        `json:"fallback_on"`

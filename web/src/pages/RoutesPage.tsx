@@ -29,6 +29,7 @@ interface EditorState {
   fallbacks: string[];
   retry: number;
   timeout_ms: number;
+  effort: 'low' | 'medium' | 'high';
   policy_id: string;
   fallback_on: string[];
 }
@@ -41,6 +42,7 @@ const emptyEditor: EditorState = {
   fallbacks: [],
   retry: 1,
   timeout_ms: 30000,
+  effort: 'medium' as const,
   policy_id: '',
   fallback_on: ['rate_limit', 'timeout', 'upstream_5xx', 'network'],
 };
@@ -211,6 +213,7 @@ export function RoutesPage() {
       fallbacks: fallbacksOf(route).map((f) => f.model_id),
       retry: route.retry,
       timeout_ms: route.timeout_ms,
+      effort: (route.effort as EditorState['effort']) || 'medium',
       policy_id: route.policy_id ?? '',
       fallback_on: route.fallback_on ? route.fallback_on.split(',') : [],
     });
@@ -237,6 +240,7 @@ export function RoutesPage() {
         fallback_model_ids: editor.fallbacks,
         retry: editor.retry,
         timeout_ms: editor.timeout_ms,
+        effort: editor.effort,
         policy_id: editor.policy_id || '',
         fallback_on: editor.fallback_on,
       };
@@ -530,6 +534,16 @@ export function RoutesPage() {
       render: (r) => <Badge tone={r.policy_name ? 'accent' : 'neutral'} dot={false}>{r.policy_name || 'Global'}</Badge>,
     },
     {
+      key: 'effort',
+      header: 'Effort',
+      align: 'center',
+      render: (r) => {
+        const e = (r.effort || 'medium') as 'low' | 'medium' | 'high';
+        const tone = e === 'high' ? 'danger' : e === 'low' ? 'success' : 'accent';
+        return <Badge tone={tone} dot={false}>{e}</Badge>;
+      },
+    },
+    {
       key: 'enabled',
       header: 'Enabled',
       align: 'center',
@@ -818,6 +832,14 @@ export function RoutesPage() {
               <Input type="number" min={1000} step={1000} value={editor.timeout_ms} onChange={(e) => setEditor({ ...editor, timeout_ms: Number(e.target.value) })} />
             </Field>
           </div>
+
+          <Field label="Reasoning effort" hint="Adaptive budget: low hemat, high untuk coding/berat. Override per-route.">
+            <Select value={editor.effort} onChange={(e) => setEditor({ ...editor, effort: e.target.value as EditorState['effort'] })}>
+              <option value="low">Low — hemat, ringan</option>
+              <option value="medium">Medium — default</option>
+              <option value="high">High — coding/berat</option>
+            </Select>
+          </Field>
 
           <CodeBlock
             language="bash"

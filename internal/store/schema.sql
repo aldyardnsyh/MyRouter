@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS route (
   retry       INTEGER NOT NULL DEFAULT 1,
   timeout_ms  INTEGER NOT NULL DEFAULT 30000,
   policy_id   TEXT REFERENCES policy(id) ON DELETE SET NULL,
+  effort      TEXT NOT NULL DEFAULT 'medium', -- adaptive reasoning budget: low|medium|high
   fallback_on TEXT NOT NULL DEFAULT 'rate_limit,timeout,upstream_5xx,network',
   created_at  INTEGER NOT NULL
 );

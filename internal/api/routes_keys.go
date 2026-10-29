@@ -28,6 +28,7 @@ type routePayload struct {
 	Strategy    string   `json:"strategy"`
 	Retry       *int     `json:"retry"`
 	TimeoutMS   *int     `json:"timeout_ms"`
+	Effort      string   `json:"effort"`
 	PolicyID    *string  `json:"policy_id"`
 	FallbackOn  []string `json:"fallback_on"`
 	Primary     string   `json:"primary_model_id"`
@@ -103,7 +104,7 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	rt := &model.Route{
 		Alias: req.Alias, Description: strings.TrimSpace(req.Description), Enabled: true,
-		Strategy: "priority", Retry: 1, TimeoutMS: 30000, FallbackOn: req.fallbackCSV(), PolicyID: policyRef,
+		Strategy: "priority", Retry: 1, TimeoutMS: 30000, Effort: defaultEffort(req.Effort), FallbackOn: req.fallbackCSV(), PolicyID: policyRef,
 	}
 	if req.Enabled != nil {
 		rt.Enabled = *req.Enabled
@@ -141,6 +142,28 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	saved, _ := s.db.RouteByID(rt.ID)
 	writeJSON(w, http.StatusCreated, map[string]any{"data": saved})
+}
+
+// normalizeEffort validates the adaptive reasoning budget per route.
+// Empty means "not provided" (caller keeps existing/default); unknown values
+// fall back to medium.
+func normalizeEffort(e string) string {
+	switch strings.ToLower(strings.TrimSpace(e)) {
+	case "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(e))
+	case "":
+		return ""
+	default:
+		return "medium"
+	}
+}
+
+// defaultEffort resolves the effort for new routes: explicit value or medium.
+func defaultEffort(e string) string {
+	if v := normalizeEffort(e); v != "" {
+		return v
+	}
+	return "medium"
 }
 
 // autoAlias converts a provider model id into a valid route alias: lowercase,
@@ -182,6 +205,25 @@ func autoAlias(modelID string, taken func(string) bool) string {
 		}
 	}
 	return ""
+}
+
+// defaultEffortForModel picks the adaptive reasoning budget for auto-created
+// routes. Lightweight heuristics on the model id only (never a hardcoded
+// route name): code/reasoning-flavoured models default to high, embedding or
+// tiny models to low, everything else medium. User can override per route.
+func defaultEffortForModel(modelID string) string {
+	lower := strings.ToLower(modelID)
+	for _, kw := range []string{"code", "coder", "reason", "think", "opus", "pro", "ultra", "70b", "405b"} {
+		if strings.Contains(lower, kw) {
+			return "high"
+		}
+	}
+	for _, kw := range []string{"embed", "mini", "nano", "tiny", "small", "haiku", "flash-lite", "1b", "3b", "7b"} {
+		if strings.Contains(lower, kw) {
+			return "low"
+		}
+	}
+	return "medium"
 }
 
 // autoRoutePayload lets the operator pick exactly which discovered models get
@@ -283,7 +325,8 @@ func (s *Server) handleAutoRoutes(w http.ResponseWriter, r *http.Request, _ *aut
 			Strategy:    "priority",
 			Retry:       1,
 			TimeoutMS:   30000,
-			FallbackOn:  "rate_limit,timeout,upstream_5xx,network,billing",
+			Effort:      defaultEffortForModel(m.ModelID),
+			FallbackOn:  "rate_limit,timeout,upstream_5xx,network",
 			Targets:     []model.RouteTarget{{ModelID: m.ID, Role: "primary", Position: 0}},
 		}
 		if err := s.db.SaveRoute(rt); err != nil {
@@ -334,6 +377,9 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	if req.Strategy != "" {
 		rt.Strategy = req.Strategy
+	}
+	if req.Effort != "" {
+		rt.Effort = normalizeEffort(req.Effort)
 	}
 	if len(req.FallbackOn) > 0 {
 		rt.FallbackOn = req.fallbackCSV()

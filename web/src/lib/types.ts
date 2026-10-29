@@ -74,6 +74,7 @@ export interface Route {
   strategy: string;
   retry: number;
   timeout_ms: number;
+  effort: 'low' | 'medium' | 'high';
   policy_id: string | null;
   policy_name?: string;
   fallback_on: string;
@@ -398,6 +399,7 @@ export interface Skill {
   // a JSON object, not a string.
   config: Record<string, unknown>;
   item_count: number;
+  will_inject: boolean;
   created_at: number;
   bindings: SkillBindings;
   last_sync_at: number;
