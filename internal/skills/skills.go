@@ -109,6 +109,7 @@ func BuildFor(db *store.DB, effective []model.Skill, query string) (*Result, err
 	var b strings.Builder
 	var applied []Applied
 	remaining := totalMaxChars
+	seen := map[string]bool{} // dedup passages already injected in this request
 
 	for _, s := range effective {
 		if remaining <= 0 {
@@ -119,7 +120,7 @@ func BuildFor(db *store.DB, effective []model.Skill, query string) (*Result, err
 		if budget > remaining {
 			budget = remaining
 		}
-		section, detail := buildSection(db, s, cfg, terms, budget)
+		section, detail := buildSection(db, s, cfg, terms, budget, seen)
 		if section == "" {
 			continue
 		}
@@ -141,7 +142,7 @@ func BuildFor(db *store.DB, effective []model.Skill, query string) (*Result, err
 // Preview renders one skill as it would be injected for a query.
 func Preview(db *store.DB, s model.Skill, query string) Result {
 	cfg := ParseConfig(s.Config)
-	section, detail := buildSection(db, s, cfg, QueryTerms(query), cfg.MaxChars)
+	section, detail := buildSection(db, s, cfg, QueryTerms(query), cfg.MaxChars, map[string]bool{})
 	if section == "" {
 		return Result{Applied: []Applied{}}
 	}
@@ -151,7 +152,7 @@ func Preview(db *store.DB, s model.Skill, query string) Result {
 	}
 }
 
-func buildSection(db *store.DB, s model.Skill, cfg Config, terms []string, budget int) (string, string) {
+func buildSection(db *store.DB, s model.Skill, cfg Config, terms []string, budget int, seen map[string]bool) (string, string) {
 	switch s.Type {
 	case model.SkillPrompt:
 		text := strings.TrimSpace(cfg.Prompt)
@@ -181,11 +182,31 @@ func buildSection(db *store.DB, s model.Skill, cfg Config, terms []string, budge
 		if len(ranked) == 0 {
 			return "", ""
 		}
+		// Dedup passages already injected in this request; truncate
+		// duplicates aggressively (title + first 200 runes) so a repeated
+		// passage costs ~nothing instead of a full re-injection.
+		fresh := make([]model.SkillItem, 0, len(ranked))
+		dups := 0
+		for _, it := range ranked {
+			key := it.Title + "|" + hashContent(it.Content)
+			if seen[key] {
+				dups++
+				continue
+			}
+			seen[key] = true
+			fresh = append(fresh, it)
+		}
+		if len(fresh) == 0 {
+			if dups > 0 {
+				return fmt.Sprintf("### %s (already injected above: %d duplicate passage(s) skipped)", s.Name, dups), fmt.Sprintf("%d duplicates skipped", dups)
+			}
+			return "", ""
+		}
 		label := "passages"
 		if s.Type == model.SkillChat {
 			label = "past exchanges"
 		}
-		return renderItems(s, ranked, budget, label), fmt.Sprintf("%d %s", len(ranked), label)
+		return renderItems(s, fresh, budget, label), fmt.Sprintf("%d %s", len(fresh), label)
 	case model.SkillVision:
 		// Vision is applied by the gateway before the prompt is built; it has
 		// no text block of its own.
@@ -220,6 +241,16 @@ func renderItems(s model.Skill, items []model.SkillItem, budget int, label strin
 		return ""
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// hashContent is a cheap FNV-1a hash for dedup keys.
+func hashContent(s string) string {
+	h := uint64(1469598103934665603)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return fmt.Sprintf("%x", h)
 }
 
 // RankItems scores items by term hits in title, source, and body. Ties keep

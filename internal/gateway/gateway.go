@@ -38,7 +38,24 @@ type Gateway struct {
 	identityMu sync.RWMutex
 	rrMu       sync.Mutex
 	rr         map[string]uint64
+
+	// stickyMu guards prefix→target affinity (prefix-aware routing).
+	stickyMu sync.Mutex
+	sticky   map[string]stickyEntry
 }
+
+// stickyEntry pins a skills-context hash to a target index with a short TTL.
+// Fail-open: expired or failing targets are simply skipped.
+type stickyEntry struct {
+	targetID string
+	exp      time.Time
+}
+
+// stickyTTL bounds how long a prefix affinity lasts.
+const stickyTTL = 60 * time.Second
+
+// stickyKey hashes the skills context prefix for a route.
+func stickyKey(routeID, prefixHash string) string { return routeID + "|" + prefixHash }
 
 // Options configures a Gateway.
 type Options struct {
@@ -64,6 +81,7 @@ func New(o Options) *Gateway {
 		db: o.DB, registry: o.Registry, box: o.Box, guard: o.Guard,
 		identity: o.Identity, client: o.Client, log: o.Log, version: o.Version,
 		live: newLiveTracker(), breaker: newBreaker(), rr: map[string]uint64{},
+		sticky: map[string]stickyEntry{},
 	}
 }
 
@@ -224,6 +242,29 @@ func EstimateTokens(messages []provider.ChatMessage) int {
 	return n
 }
 
+// contextExceededMessage fail-fast pre-flight: returns "" when the request
+// fits, otherwise a clear message with the remaining budget. EstTokens is a
+// coarse len/4 estimate, so this only catches requests that definitely cannot
+// fit — preventing a mysterious mid-stream "out of context" death.
+func contextExceededMessage(estTokens, maxTokens, window int) string {
+	if window <= 0 {
+		return ""
+	}
+	want := estTokens + maxTokens
+	if want <= 0 {
+		want = estTokens
+	}
+	if want <= window {
+		return ""
+	}
+	budget := window - estTokens
+	if budget < 0 {
+		budget = 0
+	}
+	return fmt.Sprintf("context exceeded: estimated input %d tokens + max_tokens %d exceeds model context window %d (remaining budget ~%d tokens); shorten the conversation or raise the route to a larger-context model",
+		estTokens, maxTokens, window, budget)
+}
+
 // PreparedRequest bundles everything needed to execute a call.
 type PreparedRequest struct {
 	RequestID string
@@ -288,6 +329,57 @@ func (g *Gateway) decryptCredential(providerID string) (string, error) {
 	return g.box.Decrypt(ct, nonce)
 }
 
+// SkillPrefixHash is the short hash of the injected skills context used for
+// prefix-aware routing. Empty when no skills context was injected.
+func (p *PreparedRequest) SkillPrefixHash() string {
+	s := strings.TrimSpace(p.Input.SystemExtra)
+	if s == "" {
+		return ""
+	}
+	if len(s) > 2000 {
+		s = s[:2000]
+	}
+	sum := 0
+	for i := 0; i < len(s); i++ {
+		sum = sum*31 + int(s[i])
+	}
+	return fmt.Sprintf("%x", sum)
+}
+
+// stickyOrder moves the pinned target (if still present) to the front.
+// Expired entries are dropped. Never reorders on miss.
+func (g *Gateway) stickyOrder(routeID, prefix string, targets []model.RouteTarget) []model.RouteTarget {
+	g.stickyMu.Lock()
+	defer g.stickyMu.Unlock()
+	e, ok := g.sticky[stickyKey(routeID, prefix)]
+	if !ok || time.Now().After(e.exp) {
+		delete(g.sticky, stickyKey(routeID, prefix))
+		return targets
+	}
+	for i, t := range targets {
+		if t.ModelID == e.targetID {
+			if i == 0 {
+				return targets
+			}
+			out := make([]model.RouteTarget, 0, len(targets))
+			out = append(out, t)
+			out = append(out, targets[:i]...)
+			out = append(out, targets[i+1:]...)
+			return out
+		}
+	}
+	return targets
+}
+
+// stickyRecord pins prefix→target after a success.
+func (g *Gateway) stickyRecord(routeID, prefix, targetID string) {
+	if prefix == "" || targetID == "" {
+		return
+	}
+	g.stickyMu.Lock()
+	g.sticky[stickyKey(routeID, prefix)] = stickyEntry{targetID: targetID, exp: time.Now().Add(stickyTTL)}
+	g.stickyMu.Unlock()
+}
 // maxTargetAttempts bounds how many real upstream calls one request may make
 // when a route contains a large account pool. Cheap skips (disabled provider,
 // cooldown) do not count; only calls that reach a provider do.
@@ -333,6 +425,13 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 		ordered = append(ordered, targets[start:]...)
 		ordered = append(ordered, targets[:start]...)
 		targets = ordered
+	}
+	// Prefix-aware routing (after RR so equal prefixes converge): same
+	// skills-context hash sticks to the same target within TTL (cache hit).
+	// Fail-open: miss/expired/down falls through to the current order.
+	// Fallback chain is preserved.
+	if prefix := prep.SkillPrefixHash(); prefix != "" && len(targets) > 1 {
+		targets = g.stickyOrder(route.ID, prefix, targets)
 	}
 
 	out := &Outcome{Trace: []model.TraceStep{}, Provider: &model.Provider{}}
@@ -400,10 +499,11 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 					cancel()
 				}
 				out.StreamStarted = res.Stream != nil
-				out.Fallback = idx > 0
-				out.Latency = latency
-				out.Err = nil // a later target succeeded; clear earlier failures
-				g.breaker.success(prov.ID, mdl.ModelID)
+			out.Fallback = idx > 0
+			out.Latency = latency
+			out.Err = nil // a later target succeeded; clear earlier failures
+			g.breaker.success(prov.ID, mdl.ModelID)
+			g.stickyRecord(route.ID, prep.SkillPrefixHash(), mdl.ID)
 				return out, nil
 			}
 			cancel()
@@ -500,9 +600,15 @@ func (g *Gateway) attemptOnce(ctx context.Context, prep *PreparedRequest, mdl *m
 		Temperature: prep.Input.Temperature, TopP: prep.Input.TopP, Stream: prep.Input.Stream,
 		System: prep.Input.System, SystemExtra: prep.Input.SystemExtra,
 		Headers: prep.Input.Headers, Extra: prep.Input.Extra,
+		Effort: provider.NormalizeEffort(prep.Route.Effort),
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 1024
+		req.MaxTokens = 16384
+	}
+	// Cap output at 384K (OpenCode limit.output); never lower a user value,
+	// pass streaming and non-streaming through identically.
+	if req.MaxTokens > 384000 {
+		req.MaxTokens = 384000
 	}
 	if prep.Input.Stream {
 		ch, err := adapter.StreamChat(ctx, creds, mdl.ModelID, req)
