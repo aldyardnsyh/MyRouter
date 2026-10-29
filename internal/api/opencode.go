@@ -227,6 +227,32 @@ func opencodeModels(entry map[string]any) map[string]any {
 	return models
 }
 
+// opencodeMaxContext caps the context advertised to OpenCode at 1M tokens.
+// OpenCode uses limit.context for compaction/auto-compact decisions: claiming
+// more than the upstream model supports makes OpenCode delay compaction and
+// the request dies mid-stream with "out of context". So small models keep
+// their real window, large models are capped at 1M.
+const opencodeMaxContext = 1000000
+
+// opencodeMaxOutput caps advertised output (OpenCode limit.output).
+const opencodeMaxOutput = 384000
+
+// clampOpencodeLimits returns (context, output) for a model window.
+func clampOpencodeLimits(window int) (int, int) {
+	if window <= 0 {
+		return 0, 0
+	}
+	ctx := window
+	if ctx > opencodeMaxContext {
+		ctx = opencodeMaxContext
+	}
+	out := opencodeMaxOutput
+	if ctx < out {
+		out = ctx
+	}
+	return ctx, out
+}
+
 // opencodeModelEntry builds one model block in the shape OpenCode expects.
 func opencodeModelEntry(spec opencodeModelSpec) map[string]any {
 	entry := map[string]any{
@@ -245,10 +271,10 @@ func opencodeModelEntry(spec opencodeModelSpec) map[string]any {
 	return entry
 }
 
-// mergeOpencodeProvider writes base URL, optional API key, and any route that
-// is not declared yet. Existing model entries are never modified, so hand-tuned
-// variants and names survive a sync.
-func mergeOpencodeProvider(doc map[string]any, baseURL, apiKey string, specs map[string]opencodeModelSpec) (added []string, keyUpdated bool) {
+// mergeOpencodeProvider writes base URL, optional API key, adds missing routes,
+// and prunes models no longer in specs. Existing entries still in specs are
+// never modified, so hand-tuned variants and names survive a sync.
+func mergeOpencodeProvider(doc map[string]any, baseURL, apiKey string, specs map[string]opencodeModelSpec) (added, removed []string, keyUpdated bool) {
 	entry := opencodeProviderEntry(doc)
 	if _, ok := entry["name"]; !ok {
 		entry["name"] = "MyRouter (local)"
@@ -283,7 +309,14 @@ func mergeOpencodeProvider(doc map[string]any, baseURL, apiKey string, specs map
 		models[id] = opencodeModelEntry(specs[id])
 		added = append(added, id)
 	}
-	return added, keyUpdated
+	for id := range models {
+		if _, ok := specs[id]; !ok {
+			delete(models, id)
+			removed = append(removed, id)
+		}
+	}
+	sort.Strings(removed)
+	return added, removed, keyUpdated
 }
 
 // writeOpencodeDoc writes the document atomically and keeps a timestamped
@@ -360,16 +393,15 @@ func (s *Server) opencodeSpecs() (map[string]opencodeModelSpec, error) {
 		for _, c := range store.SplitCSV(mdl.Capabilities) {
 			caps[strings.ToLower(c)] = true
 		}
+		providerName := "MyRouter"
+		if p, err := s.db.ProviderByID(mdl.ProviderID); err == nil && p != nil && strings.TrimSpace(p.Name) != "" {
+			providerName = strings.TrimSpace(p.Name)
+		}
 		spec := opencodeModelSpec{
-			ID: rt.Alias, Name: rt.Alias + " (MyRouter)", Context: mdl.ContextWindow,
+			ID: rt.Alias, Name: rt.Alias + " (" + providerName + ")",
 			Vision: caps["vision"], Tools: caps["tools"], Reasoning: caps["reasoning"],
 		}
-		if spec.Context > 0 {
-			spec.Output = 384000
-			if spec.Context < spec.Output {
-				spec.Output = spec.Context
-			}
-		}
+		spec.Context, spec.Output = clampOpencodeLimits(mdl.ContextWindow)
 		out[rt.Alias] = spec
 	}
 	return out, nil
@@ -492,7 +524,7 @@ func (s *Server) handleOpencodeSync(w http.ResponseWriter, r *http.Request, _ *a
 		writeErr(w, http.StatusBadRequest, "invalid_config", err.Error())
 		return
 	}
-	added, keyUpdated := mergeOpencodeProvider(doc, baseURL, req.APIKey, specs)
+	added, removed, keyUpdated := mergeOpencodeProvider(doc, baseURL, req.APIKey, specs)
 	backup, err := writeOpencodeDoc(path, doc)
 	if err != nil {
 		s.log.Error("opencode sync failed", logx.F("path", path), logx.F("error", err.Error()))
@@ -500,9 +532,9 @@ func (s *Server) handleOpencodeSync(w http.ResponseWriter, r *http.Request, _ *a
 		return
 	}
 	s.log.Info("opencode config synced",
-		logx.F("path", path), logx.F("added", len(added)), logx.F("api_key_updated", keyUpdated))
+		logx.F("path", path), logx.F("added", len(added)), logx.F("removed", len(removed)), logx.F("api_key_updated", keyUpdated))
 	writeOK(w, map[string]any{"data": map[string]any{
-		"path": path, "base_url": baseURL, "added": added, "models": len(specs),
+		"path": path, "base_url": baseURL, "added": added, "removed": removed, "pruned": len(removed), "models": len(specs),
 		"api_key_updated": keyUpdated, "backup": backup,
 	}})
 }

@@ -25,10 +25,13 @@ func TestMergeOpencodeProviderAddsMissingModelsOnly(t *testing.T) {
 		"new-one":  {ID: "new-one", Name: "new-one (MyRouter)", Context: 512000, Output: 384000, Tools: true, Reasoning: true},
 	}
 
-	added, keyUpdated := mergeOpencodeProvider(doc, "http://127.0.0.1:20128/v1", "mr-sk-new", specs)
+	added, removed, keyUpdated := mergeOpencodeProvider(doc, "http://127.0.0.1:20128/v1", "mr-sk-new", specs)
 
 	if len(added) != 1 || added[0] != "new-one" {
 		t.Fatalf("added = %v, want [new-one]", added)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want []", removed)
 	}
 	if !keyUpdated {
 		t.Fatal("api key update was not reported")
@@ -68,7 +71,7 @@ func TestMergeOpencodeProviderAddsMissingModelsOnly(t *testing.T) {
 
 func TestMergeOpencodeProviderLeavesKeyWhenNotProvided(t *testing.T) {
 	doc := map[string]any{}
-	_, keyUpdated := mergeOpencodeProvider(doc, "http://x/v1", "", map[string]opencodeModelSpec{})
+	_, _, keyUpdated := mergeOpencodeProvider(doc, "http://x/v1", "", map[string]opencodeModelSpec{})
 	if keyUpdated {
 		t.Fatal("key must only be reported as updated when one was supplied")
 	}
@@ -79,6 +82,50 @@ func TestMergeOpencodeProviderLeavesKeyWhenNotProvided(t *testing.T) {
 	}
 	if opts["timeout"] == nil || opts["chunkTimeout"] == nil {
 		t.Fatal("default timeouts should be filled in for a fresh provider block")
+	}
+}
+
+func TestMergeOpencodeProviderPrunesStale(t *testing.T) {
+	doc := map[string]any{"provider": map[string]any{"myrouter": map[string]any{
+		"models": map[string]any{
+			"keep":   map[string]any{"name": "hand tuned"},
+			"stale1": map[string]any{"name": "old"},
+			"stale2": map[string]any{"name": "old"},
+		},
+	}}}
+	specs := map[string]opencodeModelSpec{"keep": {ID: "keep", Name: "keep (MyRouter)"}}
+	added, removed, _ := mergeOpencodeProvider(doc, "http://x/v1", "", specs)
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want []", added)
+	}
+	if len(removed) != 2 || removed[0] != "stale1" || removed[1] != "stale2" {
+		t.Fatalf("removed = %v, want [stale1 stale2]", removed)
+	}
+	models := doc["provider"].(map[string]any)["myrouter"].(map[string]any)["models"].(map[string]any)
+	if _, ok := models["stale1"]; ok {
+		t.Fatal("stale1 not pruned")
+	}
+	if models["keep"].(map[string]any)["name"] != "hand tuned" {
+		t.Fatal("keep entry must not be modified")
+	}
+}
+
+func TestClampOpencodeLimits(t *testing.T) {
+	ctx, out := clampOpencodeLimits(128000)
+	if ctx != 128000 || out != 128000 {
+		t.Fatalf("small window must keep real size: got %d/%d", ctx, out)
+	}
+	ctx, out = clampOpencodeLimits(1000000)
+	if ctx != 1000000 || out != 384000 {
+		t.Fatalf("1M window: got %d/%d", ctx, out)
+	}
+	ctx, out = clampOpencodeLimits(2097152)
+	if ctx != 1000000 || out != 384000 {
+		t.Fatalf("2M window must cap at 1M: got %d/%d", ctx, out)
+	}
+	ctx, out = clampOpencodeLimits(0)
+	if ctx != 0 || out != 0 {
+		t.Fatalf("zero window: got %d/%d", ctx, out)
 	}
 }
 
