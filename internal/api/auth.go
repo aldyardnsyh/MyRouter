@@ -274,13 +274,14 @@ func secureCookies(r *http.Request) bool {
 }
 
 // setSessionCookies writes the session + CSRF cookie pair with the hardened
-// attributes used everywhere (HttpOnly on the session, SameSite=Lax, Secure on
-// anything that is not loopback). Centralised so login and session rotation can
-// never drift apart.
+// attributes used everywhere (HttpOnly on the session, SameSite=Strict on the
+// session so top-level navigation never sends it, Lax on the CSRF cookie,
+// Secure on anything that is not loopback). Centralised so login and session
+// rotation can never drift apart.
 func setSessionCookies(w http.ResponseWriter, r *http.Request, sessionValue, csrf string, now time.Time) {
 	secure := secureCookies(r)
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: sessionValue, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Name: sessionCookie, Value: sessionValue, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		Expires: now.Add(sessionTTL), Secure: secure,
 	})
 	http.SetCookie(w, &http.Cookie{
@@ -292,7 +293,7 @@ func setSessionCookies(w http.ResponseWriter, r *http.Request, sessionValue, csr
 // clearSessionCookies expires both auth cookies on the client.
 func clearSessionCookies(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name: csrfCookie, Value: "", Path: "/", MaxAge: -1, SameSite: http.SameSiteLaxMode,
