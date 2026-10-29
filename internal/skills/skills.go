@@ -232,9 +232,30 @@ func buildSection(db *store.DB, s model.Skill, cfg Config, terms []string, budge
 		}
 		return renderItems(s, fresh, budget, label), fmt.Sprintf("%d %s", len(fresh), label)
 	case model.SkillVision:
-		// Vision is applied by the gateway before the prompt is built; it has
-		// no text block of its own.
-		return "", ""
+		// Vision skills inject their prompt/capability text like a prompt skill
+		// (so the model knows the visual capability even without an image in
+		// this request); the image bridge in the gateway handles actual images.
+		text := strings.TrimSpace(cfg.Prompt)
+		if text == "" {
+			text = strings.TrimSpace(s.Description)
+		}
+		if text == "" {
+			// Fall back to knowledge items (imported SKILL.md) ranked by query.
+			if len(terms) > 0 {
+				if items, err := db.MatchSkillItems(s.ID, terms, maxScanItems); err == nil && len(items) > 0 {
+					if ranked := RankItems(items, terms, cfg.TopK); len(ranked) > 0 {
+						return renderItems(s, ranked, budget, "capability"), fmt.Sprintf("%d capability", len(ranked))
+					}
+				}
+			}
+			// Last resort: first items unranked so the skill is never silent.
+			if items, err := db.ListSkillItems(s.ID, cfg.TopK); err == nil && len(items) > 0 {
+				return renderItems(s, items, budget, "capability"), fmt.Sprintf("%d capability", len(items))
+			}
+			return "", ""
+		}
+		text = truncate(text, budget-64)
+		return fmt.Sprintf("### %s (visual capability)\n%s", s.Name, text), "visual capability"
 	default:
 		return "", ""
 	}
