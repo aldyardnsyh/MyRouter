@@ -139,6 +139,10 @@ type ChatRequest struct {
 	TopP        *float64      `json:"top_p,omitempty"`
 	Stream      bool          `json:"stream,omitempty"`
 	System      string        `json:"system,omitempty"`
+	// Effort is the adaptive reasoning budget (low|medium|high, default
+	// medium). Adapters map it to the provider-native field and must drop it
+	// when the provider does not support it.
+	Effort string `json:"-"`
 	// SystemExtra is server-side context added by MyRouter skills. Adapters
 	// append it after the client's own system prompt instead of mutating the
 	// client's message list.
@@ -151,11 +155,49 @@ type ChatRequest struct {
 	Extra map[string]any `json:"-"`
 }
 
-// Usage reports token accounting.
+// NormalizeEffort validates a route effort value, defaulting to medium.
+func NormalizeEffort(e string) string {
+	switch e {
+	case "low", "medium", "high":
+		return e
+	default:
+		return "medium"
+	}
+}
+
+// AnthropicThinkingBudget maps effort to an Anthropic extended-thinking
+// token budget. Only applied when the model supports thinking.
+func AnthropicThinkingBudget(effort string) int {
+	switch NormalizeEffort(effort) {
+	case "low":
+		return 1024
+	case "high":
+		return 10000
+	default:
+		return 4096
+	}
+}
+
+// GeminiThinkingLevel maps effort to the Gemini thinkingLevel value
+// (low|medium|high). Only applied when the model supports thinking.
+func GeminiThinkingLevel(effort string) string { return NormalizeEffort(effort) }
+
+// OpenAIEffort maps effort to the OpenAI Responses reasoning.effort value.
+// Only applied when the model supports reasoning.
+func OpenAIEffort(effort string) string { return NormalizeEffort(effort) }
+
+// Usage reports token accounting. CachedTokens is 0 when the upstream
+// does not report a cache hit (OpenAI prompt_tokens_details.cached_tokens,
+// Anthropic cache_read_input_tokens, Gemini cachedContentTokenCount).
 type Usage struct {
 	InputTokens  int `json:"prompt_tokens"`
 	OutputTokens int `json:"completion_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	// PromptTokensDetails carries OpenAI implicit-cache detail.
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details,omitempty"`
 }
 
 // ChatResponse is a normalized non-streaming completion.

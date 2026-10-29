@@ -90,12 +90,12 @@ func (a *GeminiAdapter) ListModels(ctx context.Context, creds Credentials) ([]Mo
 // geminiBody converts a normalized request into the generateContent payload.
 func geminiBody(req ChatRequest) map[string]any {
 	var contents []map[string]any
-	systemText := req.System
-	if extra := strings.TrimSpace(req.SystemExtra); extra != "" {
+	systemText := strings.TrimSpace(req.SystemExtra)
+	if s := strings.TrimSpace(req.System); s != "" {
 		if systemText != "" {
 			systemText += "\n\n"
 		}
-		systemText += extra
+		systemText += s
 	}
 	for _, m := range req.Messages {
 		if m.Role == "system" {
@@ -128,6 +128,14 @@ func geminiBody(req ChatRequest) map[string]any {
 	if req.MaxTokens > 0 {
 		gen["maxOutputTokens"] = req.MaxTokens
 	}
+	// Adaptive reasoning budget: thinkingLevel. Only sent when the caller
+	// opts in via Extra (gateway sets it when the model supports thinking),
+	// so non-thinking models never receive an unknown field.
+	if req.Effort != "" {
+		if _, ok := req.Extra["thinking"]; ok {
+			gen["thinkingLevel"] = GeminiThinkingLevel(req.Effort)
+		}
+	}
 	if len(gen) > 0 {
 		body["generationConfig"] = gen
 	}
@@ -147,6 +155,7 @@ type geminiResponse struct {
 		PromptTokenCount     int `json:"promptTokenCount"`
 		CandidatesTokenCount int `json:"candidatesTokenCount"`
 		TotalTokenCount      int `json:"totalTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
 	} `json:"usageMetadata"`
 }
 
@@ -172,7 +181,7 @@ func (a *GeminiAdapter) Chat(ctx context.Context, creds Credentials, model strin
 	return &ChatResponse{
 		Model: model, Content: sb.String(), Finish: finish,
 		Usage: Usage{InputTokens: resp.UsageMetadata.PromptTokenCount, OutputTokens: resp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens: resp.UsageMetadata.TotalTokenCount},
+			TotalTokens: resp.UsageMetadata.TotalTokenCount, CachedTokens: resp.UsageMetadata.CachedContentTokenCount},
 	}, nil
 }
 

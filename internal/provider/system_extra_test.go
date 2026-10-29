@@ -42,9 +42,16 @@ func TestAdaptersMergeSystemExtra(t *testing.T) {
 
 	t.Run("anthropic", func(t *testing.T) {
 		body := anthropicBody("m", req, false)
-		system, _ := body["system"].(string)
+		sysArr, _ := body["system"].([]any)
+		if len(sysArr) == 0 {
+			t.Fatalf("anthropic system not merged: %#v", body["system"])
+		}
+		system, _ := sysArr[0].(map[string]any)["text"].(string)
 		if !strings.Contains(system, "client system prompt") || !strings.Contains(system, "retrieved context") {
 			t.Fatalf("anthropic system not merged: %q", system)
+		}
+		if !strings.HasPrefix(system, "## MyRouter skills") {
+			t.Fatalf("skills not stable prefix: %q", system)
 		}
 	})
 

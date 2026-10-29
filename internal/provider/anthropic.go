@@ -103,15 +103,20 @@ func anthropicBody(model string, req ChatRequest, stream bool) map[string]any {
 		"max_tokens": 4096,
 		"stream":     stream,
 	}
-	system := req.System
-	if extra := strings.TrimSpace(req.SystemExtra); extra != "" {
+	system := strings.TrimSpace(req.SystemExtra)
+	if s := strings.TrimSpace(req.System); s != "" {
 		if system != "" {
 			system += "\n\n"
 		}
-		system += extra
+		system += s
 	}
 	if system != "" {
-		body["system"] = system
+		// Stable prefix (skills/SystemExtra) first + cache breakpoint so
+		// repeated requests hit Anthropic prompt caching.
+		body["system"] = []any{map[string]any{
+			"type": "text", "text": system,
+			"cache_control": map[string]any{"type": "ephemeral"},
+		}}
 	}
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
@@ -121,6 +126,16 @@ func anthropicBody(model string, req ChatRequest, stream bool) map[string]any {
 	}
 	if req.TopP != nil {
 		body["top_p"] = *req.TopP
+	}
+	// Adaptive reasoning budget: extended thinking. Only sent when the
+	// client/model opts in via thinking capability — never force it, an
+	// unknown field breaks non-thinking models.
+	if req.Effort != "" {
+		if v, ok := req.Extra["thinking"]; ok {
+			body["thinking"] = v
+		} else if v, ok := req.Extra["thinking_budget_tokens"]; ok {
+			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": v}
+		}
 	}
 	return body
 }
@@ -134,8 +149,10 @@ type anthropicResponse struct {
 	} `json:"content"`
 	StopReason string `json:"stop_reason"`
 	Usage      struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens         int `json:"input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
+		CacheReadInputTokens int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
 }
 
@@ -158,7 +175,8 @@ func (a *AnthropicAdapter) Chat(ctx context.Context, creds Credentials, model st
 	return &ChatResponse{
 		ID: resp.ID, Model: resp.Model, Content: sb.String(), Finish: resp.StopReason,
 		Usage: Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
-			TotalTokens: resp.Usage.InputTokens + resp.Usage.OutputTokens},
+			TotalTokens: resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			CachedTokens: resp.Usage.CacheReadInputTokens},
 	}, nil
 }
 

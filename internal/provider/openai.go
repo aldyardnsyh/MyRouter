@@ -254,6 +254,9 @@ func (a *OpenAIAdapter) Chat(ctx context.Context, creds Credentials, model strin
 		return nil, classifyTransport(err)
 	}
 	out := &ChatResponse{ID: resp.ID, Model: resp.Model, Usage: resp.Usage}
+	if out.Usage.PromptTokensDetails != nil {
+		out.Usage.CachedTokens = out.Usage.PromptTokensDetails.CachedTokens
+	}
 	if len(resp.Choices) > 0 {
 		out.Content = resp.Choices[0].Message.Text()
 		out.Reasoning = firstReasoning(resp.Choices[0].Message)
@@ -667,6 +670,12 @@ func (a *OpenAIAdapter) responsesBody(model string, req ChatRequest, stream bool
 	}
 	if req.TopP != nil {
 		body["top_p"] = *req.TopP
+	}
+	// Adaptive reasoning budget: Responses API natively supports
+	// reasoning.effort. This path only runs for reasoning models (chat 404
+	// fallback), so the field is always known here.
+	if req.Effort != "" {
+		body["reasoning"] = map[string]any{"effort": OpenAIEffort(req.Effort)}
 	}
 	return body
 }
