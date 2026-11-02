@@ -270,7 +270,7 @@ func renderItems(s model.Skill, items []model.SkillItem, budget int, label strin
 			header += " " + it.Source
 		}
 		if it.Title != "" {
-			header += " · " + it.Title
+			header += " - " + it.Title
 		}
 		room := budget - b.Len() - len(header) - 8
 		if room <= 40 {

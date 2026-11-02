@@ -320,7 +320,7 @@ func (s *Server) handleAutoRoutes(w http.ResponseWriter, r *http.Request, _ *aut
 		}
 		rt := &model.Route{
 			Alias:       alias,
-			Description: fmt.Sprintf("Auto-added · %s", prov),
+			Description: fmt.Sprintf("Auto-added - %s", prov),
 			Enabled:     true,
 			Strategy:    "priority",
 			Retry:       1,
