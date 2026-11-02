@@ -4,6 +4,28 @@ All notable changes to MyRouter are documented in this file.
 
 <!-- changelog:next -->
 
+## [v0.1.11] — 2026-11-02
+
+### Fixes
+
+- **Streams are no longer cut by the route timeout** — `timeout_ms` used to bound the entire stream, so a slow but healthy generation was killed mid-stream at the deadline and every cut still burned upstream quota. Streaming requests now keep `timeout_ms` only for the connection phase, then run under an idle watchdog: a stream is dropped only when no chunk arrives for `MYROUTER_STREAM_IDLE` (default 90s) or after `MYROUTER_STREAM_MAX` (default 15m). A stalled upstream still fails fast; a long answer no longer does.
+
+- **Rate-limited providers are waited out instead of failing the turn** — when every route target sits in breaker cooldown, the request is now held until the earliest cooldown clears (bounded by `MYROUTER_COOLDOWN_WAIT`, default 90s; `0` restores the old fail-fast behaviour). The client sees latency instead of a 429, so an interrupted turn no longer has to be restarted by hand — which is what made agents re-read the whole conversation and burn tokens.
+
+- **429 responses carry `Retry-After`** — the value comes from the breaker's remaining cooldown, so well-behaved clients back off instead of retrying into a hot key.
+
+- **A 429 is no longer retried against the same upstream** — `retry` used to spend another call on a rejection that cannot clear inside the retry window; the target is skipped and the next one is tried.
+
+- **Release pipeline publishes a new version per push** — `build-windows.ps1` bumps the patch in the runner, but the bump was never committed back, so every run recomputed the same number and GitHub silently overwrote the existing release instead of publishing a new one. CI now commits the bumped `VERSION` as a `chore(release)` commit (skipped by the workflow guard), fetches full history for the notes, tags against `main`, and serialises releases with a concurrency group.
+
+### Under the hood
+
+- `internal/gateway/gateway.go` — `streamWatchdog` replaces the fixed per-attempt deadline for streams; `cooldownWaitMax`, `streamIdleTimeout`, `streamMaxTotal` read their env overrides.
+- `internal/gateway/breaker.go` — `remaining()` exposes the longest active cooldown for `Retry-After`.
+- `internal/gateway/cooldown_wait_test.go` — covers the held-request path and the disabled-wait path.
+- User-facing strings use ASCII separators so terminals that do not render UTF-8 never show replacement characters.
+
+
 ## [v0.1.3] — 2026-10-28
 
 ### Fixes
