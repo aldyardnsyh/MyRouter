@@ -84,7 +84,7 @@ func TestChatMemoryPreferenceReinjected(t *testing.T) {
 	chat := &model.Skill{
 		ID: store.NewID("skl"), Name: "chat-knowledge", Description: "m",
 		Type: model.SkillChat, Enabled: true,
-		Config:   `{"top_k":3,"max_chars":2000,"capture_keep":10}`,
+		Config:    `{"top_k":3,"max_chars":2000,"capture_keep":10}`,
 		CreatedAt: store.Now(),
 	}
 	if err := db.CreateSkill(chat); err != nil {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -380,10 +381,52 @@ func (g *Gateway) stickyRecord(routeID, prefix, targetID string) {
 	g.sticky[stickyKey(routeID, prefix)] = stickyEntry{targetID: targetID, exp: time.Now().Add(stickyTTL)}
 	g.stickyMu.Unlock()
 }
+
 // maxTargetAttempts bounds how many real upstream calls one request may make
 // when a route contains a large account pool. Cheap skips (disabled provider,
 // cooldown) do not count; only calls that reach a provider do.
 const maxTargetAttempts = 12
+
+// Streaming lifecycle: a stream is killed when no chunk arrives for
+// streamIdleTimeout (stalled upstream) or after streamMaxTotal (absolute
+// cap). A slow-but-flowing generation is never cut — cutting a healthy
+// stream wastes upstream quota and pushes clients into retry storms.
+// Override via MYROUTER_STREAM_IDLE / MYROUTER_STREAM_MAX (Go durations).
+const (
+	defaultStreamIdle = 90 * time.Second
+	defaultStreamMax  = 15 * time.Minute
+)
+
+func streamIdleTimeout() time.Duration {
+	if v := os.Getenv("MYROUTER_STREAM_IDLE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultStreamIdle
+}
+
+func streamMaxTotal() time.Duration {
+	if v := os.Getenv("MYROUTER_STREAM_MAX"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultStreamMax
+}
+
+// cooldownWaitMax bounds how long a request is held when every route target
+// is in breaker cooldown. Holding instead of failing immediately turns a hard
+// 429 into visible latency — the client shows "loading" and continues the
+// same turn instead of being cut and retried by hand. 0 disables the wait.
+func cooldownWaitMax() time.Duration {
+	if v := os.Getenv("MYROUTER_COOLDOWN_WAIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return 90 * time.Second
+}
 
 // execute attempts the primary target then each fallback in order. Fallback is
 // only triggered for categories listed in the route's fallback_on set
@@ -414,6 +457,11 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 		budget = maxTargetAttempts
 	}
 	totalDeadline := prep.Started.Add(timeout + time.Duration(budget)*timeout/2)
+	if prep.Input.Stream {
+		// Streaming gets a generous absolute cap instead of the retry-window
+		// math above; per-chunk liveness is enforced by the idle watchdog.
+		totalDeadline = prep.Started.Add(timeout + streamMaxTotal())
+	}
 
 	// round_robin rotates the starting account per request so a pool of
 	// accounts shares load. priority keeps the declared order and only moves
@@ -438,109 +486,156 @@ func (g *Gateway) execute(ctx context.Context, prep *PreparedRequest) (*Outcome,
 	var lastCooldown *provider.Error
 	attempt := 0
 	networkAttempts := 0
-	for idx, t := range targets {
-		if networkAttempts >= maxTargetAttempts {
-			break
-		}
-		mdl, err := g.db.ModelByID(t.ModelID)
-		if err != nil {
-			continue
-		}
-		prov, err := g.db.ProviderByID(mdl.ProviderID)
-		if err != nil || !prov.Enabled || !mdl.Available {
-			out.Trace = append(out.Trace, model.TraceStep{
-				Attempt: attempt + 1, Target: mdl.ModelID, Provider: provName(prov), Outcome: "skipped",
-				Category: "unavailable", Message: "provider disabled or model unavailable",
-			})
-			attempt++
-			continue
-		}
-		if allowed, cooldownCat := g.breaker.allow(prov.ID, mdl.ModelID); !allowed {
-			lastCooldown = &provider.Error{
-				Category: cooldownCat,
-				Message:  "provider cooling down after " + string(cooldownCat),
-			}
-			out.Trace = append(out.Trace, model.TraceStep{
-				Attempt: attempt + 1, Target: mdl.ModelID, Provider: prov.Name, Outcome: "skipped",
-				Category: "cooldown", Message: lastCooldown.Message,
-			})
-			attempt++
-			continue
-		}
-
-		var lastErr *provider.Error
-		for r := 0; r <= retries; r++ {
+	waitMax := cooldownWaitMax()
+	for pass := 0; ; pass++ {
+		lastCooldown = nil
+		var minCooldown time.Duration
+		for idx, t := range targets {
 			if networkAttempts >= maxTargetAttempts {
 				break
 			}
-			networkAttempts++
-			attempt++
-			attemptCtx, cancel := context.WithDeadline(ctx, minTime(totalDeadline, time.Now().Add(timeout)))
-			start := time.Now()
-			res, perr := g.attemptOnce(attemptCtx, prep, mdl, prov)
-			latency := time.Since(start)
-
-			if perr == nil {
+			mdl, err := g.db.ModelByID(t.ModelID)
+			if err != nil {
+				continue
+			}
+			prov, err := g.db.ProviderByID(mdl.ProviderID)
+			if err != nil || !prov.Enabled || !mdl.Available {
 				out.Trace = append(out.Trace, model.TraceStep{
-					Attempt: attempt, Target: mdl.ModelID, Provider: prov.Name, Outcome: "success",
-					StatusCode: res.StatusCode, LatencyMS: latency.Milliseconds(),
+					Attempt: attempt + 1, Target: mdl.ModelID, Provider: provName(prov), Outcome: "skipped",
+					Category: "unavailable", Message: "provider disabled or model unavailable",
 				})
-				out.Model = mdl
-				out.Provider = prov
-				out.Response = res.Resp
-				// Streaming responses return while the upstream body is still
-				// being read. The per-attempt context must stay alive until the
-				// stream is drained, otherwise cancel() would abort it before
-				// the first chunk reaches the client.
-				if res.Stream != nil {
-					out.Stream = cancelWhenDone(ctx, res.Stream, cancel)
-				} else {
-					out.Stream = nil
-					cancel()
+				attempt++
+				continue
+			}
+			if allowed, cooldownCat := g.breaker.allow(prov.ID, mdl.ModelID); !allowed {
+				if d := g.breaker.remaining(prov.ID, mdl.ModelID); d > 0 && (minCooldown == 0 || d < minCooldown) {
+					minCooldown = d
 				}
-				out.StreamStarted = res.Stream != nil
-			out.Fallback = idx > 0
-			out.Latency = latency
-			out.Err = nil // a later target succeeded; clear earlier failures
-			g.breaker.success(prov.ID, mdl.ModelID)
-			g.stickyRecord(route.ID, prep.SkillPrefixHash(), mdl.ID)
-				return out, nil
+				lastCooldown = &provider.Error{
+					Category: cooldownCat,
+					Message:  "provider cooling down after " + string(cooldownCat),
+				}
+				out.Trace = append(out.Trace, model.TraceStep{
+					Attempt: attempt + 1, Target: mdl.ModelID, Provider: prov.Name, Outcome: "skipped",
+					Category: "cooldown", Message: lastCooldown.Message,
+				})
+				attempt++
+				continue
 			}
-			cancel()
 
-			lastErr = perr
-			out.Trace = append(out.Trace, model.TraceStep{
-				Attempt: attempt, Target: mdl.ModelID, Provider: prov.Name, Outcome: "error",
-				Category: string(perr.Category), StatusCode: perr.StatusCode,
-				LatencyMS: latency.Milliseconds(), Message: perr.Message,
-			})
-			g.breaker.fail(prov.ID, mdl.ModelID, perr.Category)
-			if !provider.FallbackEligible(perr.Category) || !eligible[string(perr.Category)] {
-				out.Err = perr
-				out.Model = mdl
-				out.Provider = prov
-				out.Latency = latency
-				return out, nil
-			}
-			// A billing block will not clear inside a retry window; move to the
-			// next account immediately instead of retrying the same one.
-			if perr.Category == provider.CatBilling {
-				break
-			}
-			// Bounded exponential backoff with jitter before retrying.
-			if r < retries {
-				select {
-				case <-time.After(jitter(50 * time.Millisecond)):
-				case <-ctx.Done():
-					out.Err = &provider.Error{Category: provider.CatTimeout, Message: "request cancelled"}
+			var lastErr *provider.Error
+			for r := 0; r <= retries; r++ {
+				if networkAttempts >= maxTargetAttempts {
+					break
+				}
+				networkAttempts++
+				attempt++
+				var attemptCtx context.Context
+				var cancel context.CancelFunc
+				var connGuard *time.Timer
+				if prep.Input.Stream {
+					// A stream must not be bounded by the route timeout: a slow
+					// but flowing generation would be cut mid-stream, and every
+					// cut still burns upstream quota. The stream watchdog (below)
+					// owns the stream lifetime; this guard only covers the
+					// connection phase (no response headers within the timeout).
+					attemptCtx, cancel = context.WithCancel(ctx)
+					connGuard = time.AfterFunc(timeout, cancel)
+				} else {
+					attemptCtx, cancel = context.WithDeadline(ctx, minTime(totalDeadline, time.Now().Add(timeout)))
+				}
+				start := time.Now()
+				res, perr := g.attemptOnce(attemptCtx, prep, mdl, prov)
+				if connGuard != nil {
+					connGuard.Stop()
+				}
+				latency := time.Since(start)
+
+				if perr == nil {
+					out.Trace = append(out.Trace, model.TraceStep{
+						Attempt: attempt, Target: mdl.ModelID, Provider: prov.Name, Outcome: "success",
+						StatusCode: res.StatusCode, LatencyMS: latency.Milliseconds(),
+					})
+					out.Model = mdl
+					out.Provider = prov
+					out.Response = res.Resp
+					// Streaming responses return while the upstream body is still
+					// being read. The per-attempt context must stay alive until the
+					// stream is drained, otherwise cancel() would abort it before
+					// the first chunk reaches the client.
+					if res.Stream != nil {
+						out.Stream = streamWatchdog(ctx, res.Stream, cancel, streamIdleTimeout(), time.Until(totalDeadline))
+					} else {
+						out.Stream = nil
+						cancel()
+					}
+					out.StreamStarted = res.Stream != nil
+					out.Fallback = idx > 0
+					out.Latency = latency
+					out.Err = nil // a later target succeeded; clear earlier failures
+					g.breaker.success(prov.ID, mdl.ModelID)
+					g.stickyRecord(route.ID, prep.SkillPrefixHash(), mdl.ID)
 					return out, nil
 				}
+				cancel()
+
+				lastErr = perr
+				out.Trace = append(out.Trace, model.TraceStep{
+					Attempt: attempt, Target: mdl.ModelID, Provider: prov.Name, Outcome: "error",
+					Category: string(perr.Category), StatusCode: perr.StatusCode,
+					LatencyMS: latency.Milliseconds(), Message: perr.Message,
+				})
+				g.breaker.fail(prov.ID, mdl.ModelID, perr.Category)
+				if !provider.FallbackEligible(perr.Category) || !eligible[string(perr.Category)] {
+					out.Err = perr
+					out.Model = mdl
+					out.Provider = prov
+					out.Latency = latency
+					return out, nil
+				}
+				// A billing block or a rate limit will not clear inside a retry
+				// window; move to the next target immediately instead of burning
+				// another upstream call for the same rejection.
+				if perr.Category == provider.CatBilling || perr.Category == provider.CatRateLimit {
+					break
+				}
+				// Bounded exponential backoff with jitter before retrying.
+				if r < retries {
+					select {
+					case <-time.After(jitter(50 * time.Millisecond)):
+					case <-ctx.Done():
+						out.Err = &provider.Error{Category: provider.CatTimeout, Message: "request cancelled"}
+						return out, nil
+					}
+				}
+			}
+			if lastErr != nil {
+				out.Err = lastErr
+				out.Model = mdl
+				out.Provider = prov
 			}
 		}
-		if lastErr != nil {
-			out.Err = lastErr
-			out.Model = mdl
-			out.Provider = prov
+		// Cooldown wait: every target was skipped because the breaker is
+		// cooling down. Hold the request until the earliest cooldown clears
+		// (bounded by MYROUTER_COOLDOWN_WAIT) and run the target loop once
+		// more. The client sees latency ("loading") instead of a 429.
+		if pass > 0 || out.Err != nil || lastCooldown == nil || minCooldown <= 0 || waitMax <= 0 {
+			break
+		}
+		wait := minCooldown
+		if wait > waitMax {
+			wait = waitMax
+		}
+		out.Trace = append(out.Trace, model.TraceStep{
+			Attempt: attempt + 1, Target: "-", Outcome: "waited", Category: "cooldown",
+			Message: fmt.Sprintf("waiting %s for cooldown", wait.Round(time.Millisecond)),
+		})
+		attempt++
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			out.Err = &provider.Error{Category: provider.CatTimeout, Message: "request cancelled while waiting for cooldown"}
+			return out, nil
 		}
 	}
 	if out.Err == nil {
@@ -576,6 +671,60 @@ func cancelWhenDone(ctx context.Context, in <-chan provider.StreamEvent, cancel 
 				if !ok {
 					return
 				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// streamWatchdog forwards the provider stream and releases the per-attempt
+// context when the stream ends, when no chunk arrives within idle (stalled
+// upstream), or when maxWait elapses (absolute cap). The idle timer resets on
+// every upstream event, so generation speed no longer matters — only
+// liveness does. A background drain keeps reading `in` after the watchdog
+// returns so the adapter goroutine can finish and close its channel.
+func streamWatchdog(ctx context.Context, in <-chan provider.StreamEvent, cancel context.CancelFunc, idle, maxWait time.Duration) <-chan provider.StreamEvent {
+	out := make(chan provider.StreamEvent)
+	go func() {
+		defer close(out)
+		defer cancel()
+		if maxWait <= 0 {
+			maxWait = idle
+		}
+		idleT := time.NewTimer(idle)
+		defer idleT.Stop()
+		maxT := time.NewTimer(maxWait)
+		defer maxT.Stop()
+		defer func() {
+			go func() {
+				for range in {
+				}
+			}()
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-idleT.C:
+				return
+			case <-maxT.C:
+				return
+			case ev, ok := <-in:
+				if !ok {
+					return
+				}
+				if !idleT.Stop() {
+					select {
+					case <-idleT.C:
+					default:
+					}
+				}
+				idleT.Reset(idle)
 				select {
 				case out <- ev:
 				case <-ctx.Done():

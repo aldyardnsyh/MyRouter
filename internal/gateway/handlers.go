@@ -231,7 +231,27 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		status := statusFor(outcome.Err)
 		g.logActivity(requestID, started, r, auth, route, outcome.Provider, outcome.Model, "error", status, latency.Milliseconds(),
 			outcome.InTokens, outcome.OutTokens, "", "", outcome.Err.Message, prep.traceWith(outcome.Trace))
-		WriteOpenAIError(w, status, "upstream_error", string(outcome.Err.Category), outcome.Err.Message, 0)
+		// Tell well-behaved clients how long to back off: a rate-limited
+		// provider cools down in the breaker; without Retry-After clients
+		// retry immediately and deepen the limit.
+		retryAfter := 0
+		if outcome.Err.Category == provider.CatRateLimit {
+			pid, mid := "", ""
+			if outcome.Provider != nil && outcome.Model != nil {
+				pid, mid = outcome.Provider.ID, outcome.Model.ID
+			} else if pt, ok := route.Primary(); ok {
+				pid, mid = pt.ProviderID, pt.ModelID
+			}
+			if pid != "" {
+				if d := g.breaker.remaining(pid, mid); d > 0 {
+					retryAfter = int(d.Seconds())
+					if retryAfter < 1 {
+						retryAfter = 1
+					}
+				}
+			}
+		}
+		WriteOpenAIError(w, status, "upstream_error", string(outcome.Err.Category), outcome.Err.Message, retryAfter)
 		return
 	}
 

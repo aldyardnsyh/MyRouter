@@ -92,6 +92,24 @@ func (b *breaker) success(providerID, modelID string) {
 	}
 }
 
+// remaining reports the longest cooldown still active for a target
+// (0 if none). Used to set Retry-After on rate-limit responses so clients
+// back off instead of retrying into a hot breaker.
+func (b *breaker) remaining(providerID, modelID string) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	var longest time.Duration
+	for _, key := range breakerKeys(providerID, modelID) {
+		if st, ok := b.state[key]; ok && now.Before(st.until) {
+			if d := time.Until(st.until); d > longest {
+				longest = d
+			}
+		}
+	}
+	return longest
+}
+
 func cooldownFor(cat provider.ErrorCategory) time.Duration {
 	switch cat {
 	case provider.CatBilling:
