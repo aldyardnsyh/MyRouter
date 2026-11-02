@@ -1,0 +1,35 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": [
+        "../web/public/icon-192.png"
+      ]
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "__VERSION__.0",
+          "product_version": "__VERSION__.0"
+        },
+        "info": {
+          "0409": {
+            "Comments": "Local AI gateway on 127.0.0.1:20128",
+            "CompanyName": "PogungSoftwareHouseTeam(PSHT)",
+            "FileDescription": "MyRouter - local AI gateway",
+            "FileVersion": "__VERSION__",
+            "InternalName": "MyRouter",
+            "LegalCopyright": "Copyright (c) 2026 PogungSoftwareHouseTeam(PSHT)",
+            "LegalTrademarks": "",
+            "OriginalFilename": "MyRouter.exe",
+            "PrivateBuild": "",
+            "ProductName": "MyRouter",
+            "ProductVersion": "__VERSION__",
+            "SpecialBuild": ""
+          }
+        }
+      }
+    }
+  }
+}

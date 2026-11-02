@@ -12,6 +12,8 @@ secrets*
 
 # --- Build artefacts ---
 *.tsbuildinfo
+*.syso
+winres/winres.json
 web/node_modules/
 node_modules/
 web/dist/

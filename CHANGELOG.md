@@ -4,6 +4,19 @@ All notable changes to MyRouter are documented in this file.
 
 <!-- changelog:next -->
 
+## [v0.1.12] — 2026-11-02
+
+### Added
+
+- **Windows file metadata** — Explorer > Properties > Details now shows `FileVersion`, `ProductVersion`, `ProductName`, `CompanyName` (`PogungSoftwareHouseTeam(PSHT)`), `LegalCopyright`, `FileDescription` and `OriginalFilename`. Previously the binary carried only an icon, so every field was blank and there was no way to tell which build was installed.
+
+### Under the hood
+
+- `winres/winres.template.json` holds the VERSIONINFO block with a `__VERSION__` placeholder; `scripts/build-windows.ps1` substitutes the version being built, renders `winres/winres.json`, and generates `cmd/myrouter/rsrc.syso` with `go-winres` so `go build` embeds it. `--out` must keep the `.syso` extension, otherwise Go silently ignores the file.
+- The icon is generated from `web/public/icon-192.png`; `favicon.ico` is skipped because its frames are BMP-encoded, which `go-winres` cannot read.
+- `rsrc.syso` and `winres/winres.json` are build outputs and are now git-ignored; the stale committed `rsrc.syso` (icon only, no VERSIONINFO) was removed.
+
+
 ## [v0.1.11] — 2026-11-02
 
 ### Fixes

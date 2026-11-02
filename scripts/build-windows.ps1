@@ -36,6 +36,28 @@ if ($Version) {
 }
 Write-Host "Version: $buildVersion" -ForegroundColor Cyan
 
+# Windows resource metadata: Explorer > Properties > Details reads VERSIONINFO
+# from the embedded .syso. It is generated from the template on every build so
+# FileVersion / ProductVersion always match the release being cut.
+Write-Host "Generating Windows resource metadata..." -ForegroundColor Cyan
+$winresTemplate = Join-Path $root "winres\winres.template.json"
+$winresJson = Join-Path $root "winres\winres.json"
+if (-not (Test-Path -LiteralPath $winresTemplate)) {
+  throw "missing $winresTemplate"
+}
+$winresText = (Get-Content -LiteralPath $winresTemplate -Raw).Replace("__VERSION__", $buildVersion)
+Set-Content -LiteralPath $winresJson -Value $winresText -NoNewline -Encoding ascii
+
+$targetArch = if ($env:GOARCH) { $env:GOARCH } else { "amd64" }
+go run github.com/tc-hib/go-winres@v0.3.3 make `
+  --in "winres/winres.json" `
+  --out "cmd\myrouter\rsrc.syso" `
+  --arch $targetArch `
+  --no-suffix `
+  --product-version $buildVersion `
+  --file-version $buildVersion
+if ($LASTEXITCODE -ne 0) { throw "windows resource generation failed" }
+
 Write-Host "Building web assets..." -ForegroundColor Cyan
 Push-Location (Join-Path $root "web")
 try {
