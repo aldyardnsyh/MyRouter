@@ -4,6 +4,13 @@ All notable changes to MyRouter are documented in this file.
 
 <!-- changelog:next -->
 
+## [Unreleased]
+
+### Added
+
+- **Copyright credit in the dashboard sidebar** — the desktop sidebar footer and the mobile drawer now show `Copyright (c) 2026 PogungSoftwareHouseTeam(PSHT)` below the status and version, matching the Windows binary metadata.
+- `vite preview` now proxies `/admin`, `/v1` and `/healthz` to the local router so the production build can be checked visually without touching the running app.
+
 ## [v0.1.12] — 2026-11-02
 
 ### Added

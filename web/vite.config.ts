@@ -25,4 +25,14 @@ export default defineConfig({
       '/healthz': 'http://localhost:20128',
     },
   },
+  // Static preview of the production build (used for visual QA without
+  // touching the running router): `vite preview --port 4173`.
+  preview: {
+    port: 4173,
+    proxy: {
+      '/admin': 'http://localhost:20128',
+      '/v1': 'http://localhost:20128',
+      '/healthz': 'http://localhost:20128',
+    },
+  },
 });

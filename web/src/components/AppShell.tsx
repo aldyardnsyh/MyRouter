@@ -30,6 +30,9 @@ import { useQuery } from '../lib/useQuery';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useCopy } from './ui/Toast';
 
+// Attribution shown in the sidebar footer (desktop + mobile drawer).
+const COPYRIGHT = 'Copyright (c) 2026 PogungSoftwareHouseTeam(PSHT)';
+
 const nav = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/providers', label: 'Providers', icon: Server },
@@ -193,15 +196,18 @@ export function AppShell() {
             ))}
           </nav>
         </div>
-        <div className="flex items-center justify-between gap-2 border-t border-border bg-surface px-3 py-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className={classNames('h-2 w-2 shrink-0 rounded-full', offline ? 'bg-danger' : running ? 'bg-success' : 'bg-warning')} aria-hidden />
-            <div className="flex min-w-0 flex-col">
-              <span className="text-[11.5px] leading-none font-medium text-text">{offline ? 'Stopped' : running ? 'Running' : 'Degraded'}</span>
-              <span className="mt-1 font-mono text-[10.5px] leading-none text-muted">v{version}</span>
+        <div className="border-t border-border bg-surface px-3 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className={classNames('h-2 w-2 shrink-0 rounded-full', offline ? 'bg-danger' : running ? 'bg-success' : 'bg-warning')} aria-hidden />
+              <div className="flex min-w-0 flex-col">
+                <span className="text-[11.5px] leading-none font-medium text-text">{offline ? 'Stopped' : running ? 'Running' : 'Degraded'}</span>
+                <span className="mt-1 font-mono text-[10.5px] leading-none text-muted">v{version}</span>
+              </div>
             </div>
+            <ThemeToggle />
           </div>
-          <ThemeToggle />
+          <p className="mt-2.5 font-mono text-[10px] leading-[1.4] text-muted">{COPYRIGHT}</p>
         </div>
       </aside>
 
@@ -271,9 +277,12 @@ export function AppShell() {
                 </NavLink>
               ))}
             </nav>
-            <div className="flex items-center justify-between border-t border-border px-3 py-3">
-              <span className="text-[11.5px] text-muted">v{version}</span>
-              <ThemeToggle />
+            <div className="border-t border-border px-3 py-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11.5px] text-muted">v{version}</span>
+                <ThemeToggle />
+              </div>
+              <p className="mt-2 font-mono text-[10px] leading-[1.4] text-muted">{COPYRIGHT}</p>
             </div>
           </aside>
         </div>
